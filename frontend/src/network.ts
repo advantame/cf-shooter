@@ -38,6 +38,10 @@ export function connect() {
     if (msg.type === "hello") {
       state.setMyId(msg.playerId);
       state.setMyZone(msg.zone);
+      // zone 2が割り当てられた場合は3人モード
+      if (msg.zone >= 2) {
+        state.setPlayerCount(3);
+      }
       const angle = getZoneCenterAngle(msg.zone);
       const dist = ARENA_RADIUS * 0.6;
       state.setMyX(CENTER_X + Math.cos(angle) * dist);
@@ -83,6 +87,10 @@ export function connect() {
           state.enemyBeamEffects.delete(id);
         }
       }
+
+      // プレイヤー数を更新（2人 or 3人で領域分割が変わる）
+      const totalPlayers = Object.keys(msg.players).length;
+      state.setPlayerCount(totalPlayers >= 3 ? 3 : 2);
     }
 
     if (msg.type === "fire") {

@@ -2,16 +2,21 @@ import { ARENA_RADIUS, CENTER_X, CENTER_Y, PLAYER_RADIUS } from "./constants";
 import * as state from "./state";
 
 // 領域の中心角度を取得（ラジアン）
+// 2人: 180度ずつ (zone 0: 下, zone 1: 上)
+// 3人: 120度ずつ (zone 0: 下, zone 1: 右上, zone 2: 左上)
 export function getZoneCenterAngle(zone: number): number {
-  return (-Math.PI / 2) + (zone * Math.PI * 2 / 3);
+  const n = state.playerCount;
+  return (-Math.PI / 2) + (zone * Math.PI * 2 / n);
 }
 
 // 領域の開始・終了角度
 export function getZoneAngles(zone: number): { start: number; end: number } {
+  const n = state.playerCount;
   const center = getZoneCenterAngle(zone);
+  const halfAngle = Math.PI / n;
   return {
-    start: center - Math.PI / 3,
-    end: center + Math.PI / 3,
+    start: center - halfAngle,
+    end: center + halfAngle,
   };
 }
 

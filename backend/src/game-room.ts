@@ -78,7 +78,7 @@ export class GameRoom implements DurableObject {
 
     this.state.acceptWebSocket(server);
 
-    // 空いているzoneを割り当て
+    // 空いているzoneを割り当て（0, 1を優先的に使用）
     let zone = 0;
     for (let i = 0; i < 3; i++) {
       if (!this.usedZones.has(i)) {
@@ -87,6 +87,9 @@ export class GameRoom implements DurableObject {
       }
     }
     this.usedZones.add(zone);
+
+    // 3人目が入った時、既存プレイヤーのzoneを再割り当てする必要があるが、
+    // クライアント側でplayerCountに応じて動的に描画するので、サーバーは変更不要
 
     const playerId = crypto.randomUUID();
     const initialState: PlayerState = {

@@ -51,8 +51,8 @@ export function draw(ctx: CanvasRenderingContext2D) {
   ctx.arc(CENTER_X, CENTER_Y, ARENA_RADIUS, 0, Math.PI * 2);
   ctx.stroke();
 
-  // 3分割ピザ領域
-  for (let zone = 0; zone < 3; zone++) {
+  // プレイヤー数に応じた領域分割
+  for (let zone = 0; zone < state.playerCount; zone++) {
     const { start, end } = getZoneAngles(zone);
     ctx.fillStyle = zone === state.myZone ? ZONE_COLORS[zone].replace("0.15", "0.25") : ZONE_COLORS[zone];
     ctx.beginPath();
@@ -76,7 +76,7 @@ export function draw(ctx: CanvasRenderingContext2D) {
     ctx.fillStyle = PLAYER_COLORS[player.zone] || "#ff6600";
     for (const b of bullets) {
       ctx.beginPath();
-      ctx.arc(b.x, b.y, SIZE * 0.012, 0, Math.PI * 2);
+      ctx.arc(b.x, b.y, SIZE * 0.006, 0, Math.PI * 2);
       ctx.fill();
     }
   }
@@ -160,7 +160,7 @@ export function draw(ctx: CanvasRenderingContext2D) {
   ctx.fillStyle = PLAYER_COLORS[state.myZone];
   for (const b of state.myBullets) {
     ctx.beginPath();
-    ctx.arc(b.x, b.y, SIZE * 0.012, 0, Math.PI * 2);
+    ctx.arc(b.x, b.y, SIZE * 0.006, 0, Math.PI * 2);
     ctx.fill();
   }
 
@@ -365,8 +365,8 @@ export function draw(ctx: CanvasRenderingContext2D) {
   ctx.font = `${SIZE * 0.03}px sans-serif`;
   ctx.fillText(`room=${room}  ${state.connectionStatus}`, SIZE * 0.02, SIZE * 0.05);
 
-  const playerCount = Object.keys(state.otherPlayers).length + (state.myId ? 1 : 0);
-  ctx.fillText(`Players: ${playerCount}/3`, SIZE * 0.02, SIZE * 0.09);
+  const currentPlayers = Object.keys(state.otherPlayers).length + (state.myId ? 1 : 0);
+  ctx.fillText(`Players: ${currentPlayers}`, SIZE * 0.02, SIZE * 0.09);
 
   ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
   ctx.font = `${SIZE * 0.025}px sans-serif`;

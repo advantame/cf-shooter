@@ -34,6 +34,9 @@ export let processedBulletIds: Set<string> = new Set();
 // 接続状態
 export let connectionStatus = "接続中...";
 
+// プレイヤー数（2人 or 3人で領域分割が変わる）
+export let playerCount = 2;
+
 // Setter関数
 export function setMyId(id: string | null) { myId = id; }
 export function setMyZone(zone: number) { myZone = zone; }
@@ -50,6 +53,7 @@ export function setBeamWarnings(warnings: BeamWarning[]) { beamWarnings = warnin
 export function setExplosionEffects(effects: ExplosionEffect[]) { explosionEffects = effects; }
 export function setOtherPlayers(players: Record<string, OtherPlayer>) { otherPlayers = players; }
 export function setConnectionStatus(status: string) { connectionStatus = status; }
+export function setPlayerCount(count: number) { playerCount = count; }
 
 // リセット関数
 export function resetState() {
