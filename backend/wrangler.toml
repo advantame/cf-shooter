@@ -1,0 +1,12 @@
+name = "cf-shooter-backend"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[durable_objects]
+bindings = [
+  { name = "GAME_ROOMS", class_name = "GameRoom" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["GameRoom"]
