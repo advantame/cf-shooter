@@ -121,28 +121,6 @@ function normalizeAngle(a: number): number {
   return a;
 }
 
-// 点が領域内にあるか判定
-function isInZone(x: number, y: number, zone: number): boolean {
-  const dx = x - CENTER_X;
-  const dy = y - CENTER_Y;
-  const dist = Math.hypot(dx, dy);
-  if (dist > ARENA_RADIUS) return false;
-
-  const angle = Math.atan2(dy, dx);
-  const { start, end } = getZoneAngles(zone);
-
-  // 角度が範囲内か
-  const normAngle = normalizeAngle(angle);
-  const normStart = normalizeAngle(start);
-  const normEnd = normalizeAngle(end);
-
-  if (normStart < normEnd) {
-    return normAngle >= normStart && normAngle <= normEnd;
-  } else {
-    // 範囲が-PI/PIをまたぐ場合
-    return normAngle >= normStart || normAngle <= normEnd;
-  }
-}
 
 // 領域内に制限
 function clampToZone(x: number, y: number, zone: number): { x: number; y: number } {
@@ -399,7 +377,7 @@ function draw() {
   }
 
   // 他プレイヤー
-  for (const [id, p] of Object.entries(otherPlayers)) {
+  for (const p of Object.values(otherPlayers)) {
     ctx.fillStyle = PLAYER_COLORS[p.zone] || "#ff5a5a";
 
     if (p.hp <= 0) ctx.globalAlpha = 0.3;
