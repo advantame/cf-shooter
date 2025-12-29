@@ -571,19 +571,20 @@ function draw() {
   // 照準インジケーター（上半分）- 照準方向を表示
   ctx.save();
   ctx.translate(CENTER_X, SIZE * 0.15);
-  // 照準の矢印
+  // 照準の矢印（操作中は明るく）
   const arrowLen = SIZE * 0.08;
   const arrowAngle = -Math.PI / 2 + aimOffset; // 上向き基準
-  ctx.strokeStyle = "rgba(255, 200, 100, 0.6)";
-  ctx.lineWidth = 3;
+  const aimAlpha = isAiming ? 1.0 : 0.6;
+  ctx.strokeStyle = `rgba(255, 200, 100, ${aimAlpha})`;
+  ctx.lineWidth = isAiming ? 4 : 3;
   ctx.beginPath();
   ctx.moveTo(0, 0);
   ctx.lineTo(Math.cos(arrowAngle) * arrowLen, Math.sin(arrowAngle) * arrowLen);
   ctx.stroke();
   // 矢印の先端
-  ctx.fillStyle = "rgba(255, 200, 100, 0.6)";
+  ctx.fillStyle = `rgba(255, 200, 100, ${aimAlpha})`;
   ctx.beginPath();
-  ctx.arc(Math.cos(arrowAngle) * arrowLen, Math.sin(arrowAngle) * arrowLen, 5, 0, Math.PI * 2);
+  ctx.arc(Math.cos(arrowAngle) * arrowLen, Math.sin(arrowAngle) * arrowLen, isAiming ? 7 : 5, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 
