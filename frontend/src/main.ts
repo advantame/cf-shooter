@@ -644,7 +644,7 @@ function fireShotgun(centerAngle: number) {
 
 // ミサイル発射
 // 弾速75%へダウン、1秒後以降は直進
-const MISSILE_SPEED = SIZE * 1.5 * 0.75; // 75%に減速
+const MISSILE_SPEED = SIZE * 0.7; // 遅めの追尾弾
 const MISSILE_HOMING_DURATION = 1000; // 1秒間のみ追尾
 
 function fireMissile(initialAngle: number) {
