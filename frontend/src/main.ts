@@ -108,13 +108,24 @@ let myBullets: { x: number; y: number; vx: number; vy: number }[] = [];
 let lastShotAt = 0;
 
 // 他プレイヤーの状態（ヒット判定用）
-let otherPlayers: Record<string, { x: number; y: number; hp: number; zone: number; bullets: { x: number; y: number }[] }> = {};
+type OtherPlayer = {
+  x: number; y: number;
+  hp: number; zone: number;
+  bullets: { x: number; y: number }[];
+  specialBullets?: { type: WeaponId; x: number; y: number; vx: number; vy: number }[];
+  beams?: { angle: number; time: number }[];
+  shield?: boolean;
+};
+let otherPlayers: Record<string, OtherPlayer> = {};
 
 // 他プレイヤーの描画用状態（補間用）
 type DisplayPlayer = {
   x: number; y: number;
   hp: number; zone: number;
   bullets: { x: number; y: number }[];
+  specialBullets: { type: WeaponId; x: number; y: number; vx: number; vy: number }[];
+  beams: { angle: number; time: number }[];
+  shield: boolean;
 };
 let otherPlayersDisplay: Record<string, DisplayPlayer> = {};
 const LERP_SPEED = 18; // 補間速度（高いほど速く追従）
@@ -857,6 +868,11 @@ function gameLoop() {
       hp: myHp,
       zone: myZone,
       bullets: myBullets,
+      specialBullets: mySpecialBullets.map(b => ({
+        type: b.type, x: b.x, y: b.y, vx: b.vx, vy: b.vy
+      })),
+      beams: beamEffects.map(b => ({ angle: b.angle, time: b.endTime })),
+      shield: now < shieldActiveUntil,
     }));
   }
 
@@ -871,6 +887,9 @@ function gameLoop() {
         hp: target.hp,
         zone: target.zone,
         bullets: target.bullets.map(b => ({ x: b.x, y: b.y })),
+        specialBullets: target.specialBullets ?? [],
+        beams: target.beams ?? [],
+        shield: target.shield ?? false,
       };
     } else {
       // 既存プレイヤー：滑らかに補間
@@ -896,6 +915,11 @@ function gameLoop() {
         }
       }
       display.bullets = newBullets;
+
+      // 特殊弾・ビーム・シールド（補間なし）
+      display.specialBullets = target.specialBullets ?? [];
+      display.beams = target.beams ?? [];
+      display.shield = target.shield ?? false;
     }
   }
   // 切断したプレイヤーを削除
@@ -915,6 +939,8 @@ function draw() {
   // 背景
   ctx.fillStyle = "#111";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const now = performance.now();
 
   // 回転して描画（自分のzoneが下に来るように）
   ctx.save();
@@ -959,6 +985,58 @@ function draw() {
     }
   }
 
+  // 他プレイヤーの特殊弾
+  for (const p of Object.values(otherPlayersDisplay)) {
+    for (const b of p.specialBullets) {
+      const weapon = WEAPONS.find(w => w.id === b.type);
+      if (!weapon) continue;
+      ctx.fillStyle = weapon.color;
+      const bulletSize = b.type === "grenade" ? SIZE * 0.025 : b.type === "missile" ? SIZE * 0.02 : SIZE * 0.015;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, bulletSize, 0, Math.PI * 2);
+      ctx.fill();
+      if (b.type === "missile") {
+        const angle = Math.atan2(b.vy, b.vx);
+        ctx.save();
+        ctx.translate(b.x, b.y);
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.moveTo(bulletSize * 1.5, 0);
+        ctx.lineTo(-bulletSize * 0.5, -bulletSize * 0.8);
+        ctx.lineTo(-bulletSize * 0.5, bulletSize * 0.8);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+
+  // 他プレイヤーのビームエフェクト
+  for (const p of Object.values(otherPlayersDisplay)) {
+    for (const beam of p.beams) {
+      const alpha = Math.min(1, (beam.time - now) / 300);
+      if (alpha <= 0) continue;
+      ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`;
+      ctx.lineWidth = SIZE * 0.02;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(
+        p.x + Math.cos(beam.angle) * ARENA_RADIUS * 2,
+        p.y + Math.sin(beam.angle) * ARENA_RADIUS * 2
+      );
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+      ctx.lineWidth = SIZE * 0.005;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(
+        p.x + Math.cos(beam.angle) * ARENA_RADIUS * 2,
+        p.y + Math.sin(beam.angle) * ARENA_RADIUS * 2
+      );
+      ctx.stroke();
+    }
+  }
+
   // 自分の弾
   ctx.fillStyle = PLAYER_COLORS[myZone];
   for (const b of myBullets) {
@@ -993,7 +1071,6 @@ function draw() {
   }
 
   // ビームエフェクトの描画
-  const now = performance.now();
   for (const beam of beamEffects) {
     const alpha = (beam.endTime - now) / 300;
     ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`;
@@ -1047,6 +1124,20 @@ function draw() {
     ctx.beginPath();
     ctx.arc(p.x, p.y, PLAYER_RADIUS, 0, Math.PI * 2);
     ctx.fill();
+
+    // 他プレイヤーのシールドエフェクト
+    if (p.shield) {
+      const shieldAlpha = 0.3 + 0.2 * Math.sin(now / 100);
+      ctx.strokeStyle = `rgba(0, 255, 0, ${shieldAlpha})`;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, PLAYER_RADIUS * 1.8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = `rgba(0, 255, 0, ${shieldAlpha * 0.3})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, PLAYER_RADIUS * 1.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     // HPバー（回転を打ち消して水平に描画）
     ctx.save();
