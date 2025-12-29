@@ -32,7 +32,7 @@ const ZONE_COLORS = ["rgba(0, 229, 255, 0.15)", "rgba(255, 90, 90, 0.15)", "rgba
 const PLAYER_COLORS = ["#00e5ff", "#ff5a5a", "#5aff5a"];
 
 // 武器システム
-type WeaponId = "grenade" | "beam" | "shotgun" | "missile" | "shield";
+type WeaponId = "grenade" | "beam" | "shotgun" | "shotgun_child" | "missile" | "shield";
 type WeaponMark = "hexagon" | "diamond" | "triangle" | "star" | "circle";
 
 type Weapon = {
@@ -69,6 +69,11 @@ type SpecialBullet = {
   createdAt: number;
   targetId?: string;
   explosionTime?: number;
+  // グレネード用: 初期速度（減衰計算用）
+  initialVx?: number;
+  initialVy?: number;
+  // ショットガン用: 最後に子弾を発射した時間
+  lastChildShotAt?: number;
 };
 
 let mySpecialBullets: SpecialBullet[] = [];
@@ -82,6 +87,18 @@ type BeamEffect = {
   endTime: number;
 };
 let beamEffects: BeamEffect[] = [];
+
+// ビーム警告エフェクト（0.75秒後に発射）
+const BEAM_WARNING_DURATION = 750; // 0.75秒
+type BeamWarning = {
+  startX: number;
+  startY: number;
+  angle: number;
+  createdAt: number;
+  fireAt: number; // 発射時刻
+  fired: boolean; // 発射済みフラグ
+};
+let beamWarnings: BeamWarning[] = [];
 
 // 爆発エフェクト
 type ExplosionEffect = {
@@ -540,23 +557,45 @@ function fireWeapon(weapon: Weapon, screenAngle: number) {
 }
 
 // グレネード発射
+// 線形減速: 初期速度から0.8秒かけて速度0へ減衰
+// 移動距離を維持するため初期速度を2倍に（∫v(t)dt = v0*t/2）
+const GRENADE_DURATION = 800; // ms
+const GRENADE_INITIAL_SPEED = SIZE * 1.0;
+
 function fireGrenade(angle: number) {
-  const speed = SIZE * 0.5; // 飛距離短め
+  const vx = Math.cos(angle) * GRENADE_INITIAL_SPEED;
+  const vy = Math.sin(angle) * GRENADE_INITIAL_SPEED;
   mySpecialBullets.push({
     type: "grenade",
     x: myX,
     y: myY,
-    vx: Math.cos(angle) * speed,
-    vy: Math.sin(angle) * speed,
+    vx: vx,
+    vy: vy,
+    initialVx: vx,
+    initialVy: vy,
     createdAt: performance.now(),
-    explosionTime: performance.now() + 800,
   });
 }
 
-// ビーム発射
+// ビーム発射（警告追加）
 function fireBeam(angle: number) {
-  const startX = myX;
-  const startY = myY;
+  const now = performance.now();
+  // 警告を追加（0.75秒後に発射）
+  beamWarnings.push({
+    startX: myX,
+    startY: myY,
+    angle: angle,
+    createdAt: now,
+    fireAt: now + BEAM_WARNING_DURATION,
+    fired: false,
+  });
+}
+
+// ビーム実際の発射処理
+function executeBeamFire(warning: BeamWarning) {
+  const startX = warning.startX;
+  const startY = warning.startY;
+  const angle = warning.angle;
   const endX = startX + Math.cos(angle) * ARENA_RADIUS * 2;
   const endY = startY + Math.sin(angle) * ARENA_RADIUS * 2;
 
@@ -583,27 +622,30 @@ function fireBeam(angle: number) {
 }
 
 // ショットガン発射
+// 遅い親弾1発を発射し、一定間隔で垂直方向に子弾を発射
+const SHOTGUN_PARENT_SPEED = SIZE * 0.6; // 遅い弾
+const SHOTGUN_CHILD_SPEED = SIZE * 1.2; // やや遅い子弾
+const SHOTGUN_CHILD_INTERVAL = 700; // 700msごとに発射
+const SHOTGUN_DURATION = 3000; // 3秒間持続
+
 function fireShotgun(centerAngle: number) {
-  const pelletCount = 7;
-  const spreadAngle = 0.6;
-  const speed = SIZE * 2.5;
-
-  for (let i = 0; i < pelletCount; i++) {
-    const offset = (i - (pelletCount - 1) / 2) * (spreadAngle / (pelletCount - 1));
-    const angle = centerAngle + offset;
-
-    mySpecialBullets.push({
-      type: "shotgun",
-      x: myX,
-      y: myY,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed,
-      createdAt: performance.now(),
-    });
-  }
+  const now = performance.now();
+  mySpecialBullets.push({
+    type: "shotgun",
+    x: myX,
+    y: myY,
+    vx: Math.cos(centerAngle) * SHOTGUN_PARENT_SPEED,
+    vy: Math.sin(centerAngle) * SHOTGUN_PARENT_SPEED,
+    createdAt: now,
+    lastChildShotAt: now, // 最初の子弾発射時刻
+  });
 }
 
 // ミサイル発射
+// 弾速75%へダウン、1秒後以降は直進
+const MISSILE_SPEED = SIZE * 1.5 * 0.75; // 75%に減速
+const MISSILE_HOMING_DURATION = 1000; // 1秒間のみ追尾
+
 function fireMissile(initialAngle: number) {
   // 最も近い敵を探す
   let nearestId: string | null = null;
@@ -618,13 +660,12 @@ function fireMissile(initialAngle: number) {
     }
   }
 
-  const speed = SIZE * 1.5;
   mySpecialBullets.push({
     type: "missile",
     x: myX,
     y: myY,
-    vx: Math.cos(initialAngle) * speed,
-    vy: Math.sin(initialAngle) * speed,
+    vx: Math.cos(initialAngle) * MISSILE_SPEED,
+    vy: Math.sin(initialAngle) * MISSILE_SPEED,
     createdAt: performance.now(),
     targetId: nearestId ?? undefined,
   });
@@ -638,25 +679,70 @@ function activateShield() {
 // 特殊弾の更新
 function updateSpecialBullets(dt: number) {
   const now = performance.now();
+  const newChildBullets: SpecialBullet[] = []; // ショットガン子弾用
 
   mySpecialBullets = mySpecialBullets.filter(bullet => {
     switch (bullet.type) {
-      case "grenade":
+      case "grenade": {
+        // 経過時間に応じて速度を減衰
+        const elapsed = now - bullet.createdAt;
+        const ratio = Math.max(0, 1 - elapsed / GRENADE_DURATION);
+
+        // 減衰後の速度で移動
+        bullet.vx = (bullet.initialVx ?? 0) * ratio;
+        bullet.vy = (bullet.initialVy ?? 0) * ratio;
         bullet.x += bullet.vx * dt;
         bullet.y += bullet.vy * dt;
-        // 爆発判定
-        if (now >= bullet.explosionTime!) {
+
+        // 速度が0になったら爆発
+        if (ratio <= 0) {
           explodeGrenade(bullet);
           return false;
         }
         return true;
+      }
 
-      case "shotgun":
+      case "shotgun": {
+        // 親弾：遅い速度で進み、一定間隔で垂直方向に子弾を発射
         bullet.x += bullet.vx * dt;
         bullet.y += bullet.vy * dt;
-        // 射程制限（アリーナ外で消滅）
+
+        // 持続時間チェック
+        if (now - bullet.createdAt > SHOTGUN_DURATION) return false;
+
+        // アリーナ外で消滅
         const shotgunDist = Math.hypot(bullet.x - CENTER_X, bullet.y - CENTER_Y);
         if (shotgunDist > ARENA_RADIUS + 50) return false;
+
+        // 一定間隔で子弾を発射
+        if (now - (bullet.lastChildShotAt ?? bullet.createdAt) >= SHOTGUN_CHILD_INTERVAL) {
+          bullet.lastChildShotAt = now;
+          // 進行方向に垂直な2方向に子弾発射
+          const parentAngle = Math.atan2(bullet.vy, bullet.vx);
+          const perpAngles = [parentAngle + Math.PI / 2, parentAngle - Math.PI / 2];
+          for (const angle of perpAngles) {
+            newChildBullets.push({
+              type: "shotgun_child",
+              x: bullet.x,
+              y: bullet.y,
+              vx: Math.cos(angle) * SHOTGUN_CHILD_SPEED,
+              vy: Math.sin(angle) * SHOTGUN_CHILD_SPEED,
+              createdAt: now,
+            });
+          }
+        }
+        return true;
+      }
+
+      case "shotgun_child": {
+        // 子弾：通常の弾として進み、当たり判定を持つ
+        bullet.x += bullet.vx * dt;
+        bullet.y += bullet.vy * dt;
+
+        // アリーナ外で消滅
+        const childDist = Math.hypot(bullet.x - CENTER_X, bullet.y - CENTER_Y);
+        if (childDist > ARENA_RADIUS + 50) return false;
+
         // 当たり判定
         for (const [id, p] of Object.entries(otherPlayers)) {
           if (p.hp <= 0) continue;
@@ -673,12 +759,15 @@ function updateSpecialBullets(dt: number) {
           }
         }
         return true;
+      }
 
-      case "missile":
+      case "missile": {
         // 3秒経過で消滅
         if (now - bullet.createdAt > 3000) return false;
-        // ターゲット追尾
-        if (bullet.targetId && otherPlayers[bullet.targetId] && otherPlayers[bullet.targetId].hp > 0) {
+        const missileElapsed = now - bullet.createdAt;
+        // 1秒間のみ追尾、それ以降は直進
+        if (missileElapsed < MISSILE_HOMING_DURATION &&
+            bullet.targetId && otherPlayers[bullet.targetId] && otherPlayers[bullet.targetId].hp > 0) {
           const target = otherPlayers[bullet.targetId];
           const toTarget = Math.atan2(target.y - bullet.y, target.x - bullet.x);
           const currentAngle = Math.atan2(bullet.vy, bullet.vx);
@@ -719,11 +808,15 @@ function updateSpecialBullets(dt: number) {
         const missileDist = Math.hypot(bullet.x - CENTER_X, bullet.y - CENTER_Y);
         if (missileDist > ARENA_RADIUS + 50) return false;
         return true;
+      }
 
       default:
         return false;
     }
   });
+
+  // ショットガンの子弾を追加
+  mySpecialBullets.push(...newChildBullets);
 }
 
 // グレネード爆発
@@ -838,6 +931,16 @@ function gameLoop() {
   // 特殊弾の更新
   updateSpecialBullets(dt);
 
+  // ビーム警告の更新（発射時刻に達したら発射）
+  for (const warning of beamWarnings) {
+    if (!warning.fired && now >= warning.fireAt) {
+      executeBeamFire(warning);
+      warning.fired = true;
+    }
+  }
+  // 発射済みの警告を削除
+  beamWarnings = beamWarnings.filter(w => !w.fired);
+
   // エフェクトの更新
   beamEffects = beamEffects.filter(e => now < e.endTime);
   explosionEffects = explosionEffects.filter(e => now < e.startTime + e.duration);
@@ -942,13 +1045,13 @@ function draw() {
     }
   }
 
-  // 他プレイヤーのビームエフェクト
+  // 他プレイヤーのビームエフェクト（太さ2倍）
   for (const p of Object.values(otherPlayers)) {
     for (const beam of p.beams) {
       const alpha = Math.min(1, (beam.time - now) / 300);
       if (alpha <= 0) continue;
       ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`;
-      ctx.lineWidth = SIZE * 0.02;
+      ctx.lineWidth = SIZE * 0.04; // 2倍
       ctx.beginPath();
       ctx.moveTo(p.x, p.y);
       ctx.lineTo(
@@ -957,7 +1060,7 @@ function draw() {
       );
       ctx.stroke();
       ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
-      ctx.lineWidth = SIZE * 0.005;
+      ctx.lineWidth = SIZE * 0.01; // 2倍
       ctx.beginPath();
       ctx.moveTo(p.x, p.y);
       ctx.lineTo(
@@ -1001,11 +1104,29 @@ function draw() {
     }
   }
 
-  // ビームエフェクトの描画
+  // ビーム警告の描画（赤い点線、点滅）
+  for (const warning of beamWarnings) {
+    // 点滅エフェクト（高速で点滅）
+    const blinkPhase = Math.sin(now / 50) * 0.5 + 0.5;
+    const alpha = 0.3 + blinkPhase * 0.5;
+    ctx.strokeStyle = `rgba(255, 50, 50, ${alpha})`;
+    ctx.lineWidth = SIZE * 0.01;
+    ctx.setLineDash([SIZE * 0.02, SIZE * 0.015]);
+    ctx.beginPath();
+    ctx.moveTo(warning.startX, warning.startY);
+    ctx.lineTo(
+      warning.startX + Math.cos(warning.angle) * ARENA_RADIUS * 2,
+      warning.startY + Math.sin(warning.angle) * ARENA_RADIUS * 2
+    );
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // ビームエフェクトの描画（太さ2倍）
   for (const beam of beamEffects) {
     const alpha = (beam.endTime - now) / 300;
     ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`;
-    ctx.lineWidth = SIZE * 0.02;
+    ctx.lineWidth = SIZE * 0.04; // 2倍
     ctx.beginPath();
     ctx.moveTo(beam.startX, beam.startY);
     ctx.lineTo(
@@ -1015,7 +1136,7 @@ function draw() {
     ctx.stroke();
     // 中心の細い線
     ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
-    ctx.lineWidth = SIZE * 0.005;
+    ctx.lineWidth = SIZE * 0.01; // 2倍
     ctx.beginPath();
     ctx.moveTo(beam.startX, beam.startY);
     ctx.lineTo(
