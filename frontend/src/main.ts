@@ -914,6 +914,23 @@ function updateSpecialBullets(dt: number) {
         }
         bullet.x += bullet.vx * dt;
         bullet.y += bullet.vy * dt;
+        // 見た目上の着弾判定（実際のダメージは被弾側で判定）
+        for (const [, p] of Object.entries(otherPlayers)) {
+          if (p.hp <= 0) continue;
+          const dx = p.x - bullet.x;
+          const dy = p.y - bullet.y;
+          if (dx * dx + dy * dy <= (PLAYER_RADIUS * 1.5) ** 2) {
+            // 爆発エフェクトを出して弾を消す（見た目のみ）
+            explosionEffects.push({
+              x: bullet.x,
+              y: bullet.y,
+              radius: PLAYER_RADIUS * 2,
+              startTime: now,
+              duration: 300,
+            });
+            return false;
+          }
+        }
         // アリーナ外で消滅
         const missileDist = Math.hypot(bullet.x - CENTER_X, bullet.y - CENTER_Y);
         if (missileDist > ARENA_RADIUS + 50) return false;
