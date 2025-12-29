@@ -25,7 +25,7 @@ const SPEED = SIZE * 0.8; // px/sec (2倍)
 const BULLET_SPEED = SIZE * 2.1; // (3倍)
 const SHOT_COOLDOWN_MS = 80; // (1.5倍速 = 120/1.5)
 const FORK_ANGLE = 0.35; // 二股の角度（広めに）
-const MAX_HP = 200; // (10倍)
+const MAX_HP = 300; // 1.5倍
 
 // 領域の色
 const ZONE_COLORS = ["rgba(0, 229, 255, 0.15)", "rgba(255, 90, 90, 0.15)", "rgba(90, 255, 90, 0.15)"];
