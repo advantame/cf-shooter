@@ -131,6 +131,7 @@ type OtherPlayer = {
   bullets: { x: number; y: number }[];
   specialBullets: { type: string; x: number; y: number; vx: number; vy: number }[];
   beams: { angle: number; time: number }[];
+  beamWarnings: { angle: number; fireAt: number }[];
   shield: boolean;
 };
 let otherPlayers: Record<string, OtherPlayer> = {};
@@ -959,6 +960,7 @@ function gameLoop() {
         type: b.type, x: b.x, y: b.y, vx: b.vx, vy: b.vy
       })),
       beams: beamEffects.map(b => ({ angle: b.angle, time: b.endTime })),
+      beamWarnings: beamWarnings.map(w => ({ angle: w.angle, fireAt: w.fireAt })),
       shield: now < shieldActiveUntil,
     }));
   }
@@ -1042,6 +1044,26 @@ function draw() {
         ctx.fill();
         ctx.restore();
       }
+    }
+  }
+
+  // 他プレイヤーのビーム警告（赤い点線、点滅）
+  for (const p of Object.values(otherPlayers)) {
+    for (const warning of p.beamWarnings || []) {
+      // 点滅エフェクト（高速で点滅）
+      const blinkPhase = Math.sin(now / 50) * 0.5 + 0.5;
+      const alpha = 0.3 + blinkPhase * 0.5;
+      ctx.strokeStyle = `rgba(255, 50, 50, ${alpha})`;
+      ctx.lineWidth = SIZE * 0.01;
+      ctx.setLineDash([SIZE * 0.02, SIZE * 0.015]);
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(
+        p.x + Math.cos(warning.angle) * ARENA_RADIUS * 2,
+        p.y + Math.sin(warning.angle) * ARENA_RADIUS * 2
+      );
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
   }
 

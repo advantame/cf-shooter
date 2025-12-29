@@ -14,6 +14,7 @@ type ClientMsg =
       bullets: { x: number; y: number; vx: number; vy: number }[];
       specialBullets?: { type: string; x: number; y: number; vx: number; vy: number }[];
       beams?: { angle: number; time: number }[];
+      beamWarnings?: { angle: number; fireAt: number }[];
       shield?: boolean;
     }
   | { type: "hit"; targetId: string };
@@ -34,6 +35,7 @@ type PlayerState = {
   bullets: { x: number; y: number }[];
   specialBullets: { type: string; x: number; y: number; vx: number; vy: number }[];
   beams: { angle: number; time: number }[];
+  beamWarnings: { angle: number; fireAt: number }[];
   shield: boolean;
 };
 
@@ -83,6 +85,7 @@ export class GameRoom implements DurableObject {
       bullets: [],
       specialBullets: [],
       beams: [],
+      beamWarnings: [],
       shield: false,
     };
     this.players.set(server, initialState);
@@ -114,6 +117,7 @@ export class GameRoom implements DurableObject {
       p.bullets = msg.bullets.map(b => ({ x: b.x, y: b.y }));
       p.specialBullets = msg.specialBullets ?? [];
       p.beams = msg.beams ?? [];
+      p.beamWarnings = msg.beamWarnings ?? [];
       p.shield = msg.shield ?? false;
     } else if (msg.type === "hit") {
       const hitMsg: ServerMsg = { type: "hit", targetId: msg.targetId, fromId: p.id };
@@ -166,6 +170,7 @@ export class GameRoom implements DurableObject {
         bullets: p.bullets,
         specialBullets: p.specialBullets,
         beams: p.beams,
+        beamWarnings: p.beamWarnings,
         shield: p.shield,
       };
     }
