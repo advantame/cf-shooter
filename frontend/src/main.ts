@@ -637,7 +637,7 @@ function fireMissile(initialAngle: number) {
 
 // シールド発動
 function activateShield() {
-  shieldActiveUntil = performance.now() + 3000;
+  shieldActiveUntil = performance.now() + 1500; // 1.5秒
 }
 
 // 特殊弾の更新
