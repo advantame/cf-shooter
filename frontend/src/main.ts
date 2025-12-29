@@ -624,8 +624,8 @@ function executeBeamFire(warning: BeamWarning) {
 
 // ショットガン発射
 // 遅い親弾1発を発射し、一定間隔で垂直方向に子弾を発射
-const SHOTGUN_PARENT_SPEED = SIZE * 0.3; // さらに遅い弾（半分）
-const SHOTGUN_CHILD_SPEED = SIZE * 1.2; // やや遅い子弾
+const SHOTGUN_PARENT_SPEED = SIZE * 0.15; // さらに遅い弾
+const SHOTGUN_CHILD_SPEED = SIZE * 0.6; // 遅い子弾
 const SHOTGUN_CHILD_INTERVAL = 700; // 700msごとに発射
 const SHOTGUN_DURATION = 3000; // 3秒間持続
 
