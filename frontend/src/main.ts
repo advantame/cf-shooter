@@ -173,67 +173,112 @@ function clampToZone(x: number, y: number, zone: number): { x: number; y: number
   };
 }
 
-// スワイプ操作（上下分割）
+// スワイプ操作（上下分割・マルチタッチ対応）
 let moveStartX = 0;
 let moveStartY = 0;
 let moveCurrentX = 0;
 let moveCurrentY = 0;
 let isMoving = false;
+let moveTouchId: number | null = null; // 移動用タッチのID
 
 let aimStartX = 0;
 let aimCurrentX = 0;
 let isAiming = false;
+let aimTouchId: number | null = null; // 照準用タッチのID
 let aimOffset = 0; // 照準のオフセット角度
 const AIM_SENSITIVITY = 0.003; // 照準感度
 
+function getTouchPos(touch: Touch, r: DOMRect): { x: number; y: number } {
+  return {
+    x: (touch.clientX - r.left) * (canvas.width / r.width),
+    y: (touch.clientY - r.top) * (canvas.height / r.height),
+  };
+}
+
 canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
-  const touch = e.touches[0];
   const r = canvas.getBoundingClientRect();
-  const tx = (touch.clientX - r.left) * (canvas.width / r.width);
-  const ty = (touch.clientY - r.top) * (canvas.height / r.height);
 
-  if (ty > SIZE / 2) {
-    // 下半分：移動
-    moveStartX = tx;
-    moveStartY = ty;
-    moveCurrentX = tx;
-    moveCurrentY = ty;
-    isMoving = true;
-  } else {
-    // 上半分：照準
-    aimStartX = tx;
-    aimCurrentX = tx;
-    isAiming = true;
+  // 新しく追加されたタッチを処理
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const touch = e.changedTouches[i];
+    const pos = getTouchPos(touch, r);
+
+    if (pos.y > SIZE / 2 && moveTouchId === null) {
+      // 下半分：移動（まだ移動タッチがない場合）
+      moveTouchId = touch.identifier;
+      moveStartX = pos.x;
+      moveStartY = pos.y;
+      moveCurrentX = pos.x;
+      moveCurrentY = pos.y;
+      isMoving = true;
+    } else if (pos.y <= SIZE / 2 && aimTouchId === null) {
+      // 上半分：照準（まだ照準タッチがない場合）
+      aimTouchId = touch.identifier;
+      aimStartX = pos.x;
+      aimCurrentX = pos.x;
+      isAiming = true;
+    }
   }
 });
 
 canvas.addEventListener("touchmove", (e) => {
   e.preventDefault();
-  const touch = e.touches[0];
   const r = canvas.getBoundingClientRect();
-  const tx = (touch.clientX - r.left) * (canvas.width / r.width);
-  const ty = (touch.clientY - r.top) * (canvas.height / r.height);
 
-  if (isMoving) {
-    moveCurrentX = tx;
-    moveCurrentY = ty;
-  }
-  if (isAiming) {
-    aimCurrentX = tx;
-    // 照準オフセットを更新
-    aimOffset += (aimCurrentX - aimStartX) * AIM_SENSITIVITY;
-    aimOffset = Math.max(-0.8, Math.min(0.8, aimOffset)); // 制限
-    aimStartX = aimCurrentX; // 相対移動
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const touch = e.changedTouches[i];
+    const pos = getTouchPos(touch, r);
+
+    if (touch.identifier === moveTouchId) {
+      // 移動タッチの更新
+      moveCurrentX = pos.x;
+      moveCurrentY = pos.y;
+    }
+
+    if (touch.identifier === aimTouchId) {
+      // 照準タッチの更新
+      aimCurrentX = pos.x;
+      aimOffset += (aimCurrentX - aimStartX) * AIM_SENSITIVITY;
+      aimOffset = Math.max(-0.8, Math.min(0.8, aimOffset));
+      aimStartX = aimCurrentX;
+    }
   }
 });
 
 canvas.addEventListener("touchend", (e) => {
   e.preventDefault();
-  // どのタッチが終わったか判定（シンプルに全部リセット）
-  if (e.touches.length === 0) {
-    isMoving = false;
-    isAiming = false;
+
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const touch = e.changedTouches[i];
+
+    if (touch.identifier === moveTouchId) {
+      moveTouchId = null;
+      isMoving = false;
+    }
+
+    if (touch.identifier === aimTouchId) {
+      aimTouchId = null;
+      isAiming = false;
+    }
+  }
+});
+
+canvas.addEventListener("touchcancel", (e) => {
+  e.preventDefault();
+
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const touch = e.changedTouches[i];
+
+    if (touch.identifier === moveTouchId) {
+      moveTouchId = null;
+      isMoving = false;
+    }
+
+    if (touch.identifier === aimTouchId) {
+      aimTouchId = null;
+      isAiming = false;
+    }
   }
 });
 
