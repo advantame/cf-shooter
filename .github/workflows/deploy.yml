@@ -42,11 +42,18 @@ jobs:
         run: npm run build
         working-directory: frontend
         env:
-          VITE_BACKEND_BASE: https://cf-shooter-backend.${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.workers.dev
+          VITE_BACKEND_BASE: https://cf-shooter-backend.wstomo53.workers.dev
+      - name: Create Pages project if not exists
+        uses: cloudflare/wrangler-action@v3
+        continue-on-error: true
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages project create cf-shooter-frontend --production-branch main
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: frontend
-          command: pages deploy dist --project-name=cf-shooter-frontend
+          command: pages deploy dist --project-name=cf-shooter-frontend --commit-dirty=true
