@@ -624,7 +624,7 @@ function executeBeamFire(warning: BeamWarning) {
 
 // ショットガン発射
 // 遅い親弾1発を発射し、一定間隔で垂直方向に子弾を発射
-const SHOTGUN_PARENT_SPEED = SIZE * 0.6; // 遅い弾
+const SHOTGUN_PARENT_SPEED = SIZE * 0.3; // さらに遅い弾（半分）
 const SHOTGUN_CHILD_SPEED = SIZE * 1.2; // やや遅い子弾
 const SHOTGUN_CHILD_INTERVAL = 700; // 700msごとに発射
 const SHOTGUN_DURATION = 3000; // 3秒間持続
@@ -1067,13 +1067,13 @@ function draw() {
     }
   }
 
-  // 他プレイヤーのビームエフェクト（太さ2倍）
+  // 他プレイヤーのビームエフェクト（太さ6倍）
   for (const p of Object.values(otherPlayers)) {
     for (const beam of p.beams) {
       const alpha = Math.min(1, (beam.time - now) / 300);
       if (alpha <= 0) continue;
       ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`;
-      ctx.lineWidth = SIZE * 0.04; // 2倍
+      ctx.lineWidth = SIZE * 0.12; // 6倍
       ctx.beginPath();
       ctx.moveTo(p.x, p.y);
       ctx.lineTo(
@@ -1082,7 +1082,7 @@ function draw() {
       );
       ctx.stroke();
       ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
-      ctx.lineWidth = SIZE * 0.01; // 2倍
+      ctx.lineWidth = SIZE * 0.03; // 6倍
       ctx.beginPath();
       ctx.moveTo(p.x, p.y);
       ctx.lineTo(
@@ -1103,10 +1103,15 @@ function draw() {
 
   // 特殊弾の描画
   for (const b of mySpecialBullets) {
-    const weapon = WEAPONS.find(w => w.id === b.type);
-    if (!weapon) continue;
-    ctx.fillStyle = weapon.color;
-    const bulletSize = b.type === "grenade" ? SIZE * 0.025 : b.type === "missile" ? SIZE * 0.02 : SIZE * 0.015;
+    // shotgun_childは親武器の色を使用
+    const weapon = WEAPONS.find(w => w.id === b.type || (b.type === "shotgun_child" && w.id === "shotgun"));
+    const bulletColor = weapon?.color ?? "#ffff00";
+    ctx.fillStyle = bulletColor;
+    const bulletSize = b.type === "grenade" ? SIZE * 0.025 :
+                       b.type === "missile" ? SIZE * 0.02 :
+                       b.type === "shotgun" ? SIZE * 0.02 :
+                       b.type === "shotgun_child" ? SIZE * 0.012 :
+                       SIZE * 0.015;
     ctx.beginPath();
     ctx.arc(b.x, b.y, bulletSize, 0, Math.PI * 2);
     ctx.fill();
@@ -1144,11 +1149,11 @@ function draw() {
     ctx.setLineDash([]);
   }
 
-  // ビームエフェクトの描画（太さ2倍）
+  // ビームエフェクトの描画（太さ6倍）
   for (const beam of beamEffects) {
     const alpha = (beam.endTime - now) / 300;
     ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`;
-    ctx.lineWidth = SIZE * 0.04; // 2倍
+    ctx.lineWidth = SIZE * 0.12; // 6倍
     ctx.beginPath();
     ctx.moveTo(beam.startX, beam.startY);
     ctx.lineTo(
@@ -1158,7 +1163,7 @@ function draw() {
     ctx.stroke();
     // 中心の細い線
     ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
-    ctx.lineWidth = SIZE * 0.01; // 2倍
+    ctx.lineWidth = SIZE * 0.03; // 6倍
     ctx.beginPath();
     ctx.moveTo(beam.startX, beam.startY);
     ctx.lineTo(
