@@ -173,63 +173,117 @@ function clampToZone(x: number, y: number, zone: number): { x: number; y: number
   };
 }
 
-// スワイプ操作
-let touchStartX = 0;
-let touchStartY = 0;
-let touchCurrentX = 0;
-let touchCurrentY = 0;
-let isTouching = false;
+// スワイプ操作（上下分割）
+let moveStartX = 0;
+let moveStartY = 0;
+let moveCurrentX = 0;
+let moveCurrentY = 0;
+let isMoving = false;
+
+let aimStartX = 0;
+let aimCurrentX = 0;
+let isAiming = false;
+let aimOffset = 0; // 照準のオフセット角度
+const AIM_SENSITIVITY = 0.003; // 照準感度
 
 canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
   const touch = e.touches[0];
   const r = canvas.getBoundingClientRect();
-  touchStartX = (touch.clientX - r.left) * (canvas.width / r.width);
-  touchStartY = (touch.clientY - r.top) * (canvas.height / r.height);
-  touchCurrentX = touchStartX;
-  touchCurrentY = touchStartY;
-  isTouching = true;
+  const tx = (touch.clientX - r.left) * (canvas.width / r.width);
+  const ty = (touch.clientY - r.top) * (canvas.height / r.height);
+
+  if (ty > SIZE / 2) {
+    // 下半分：移動
+    moveStartX = tx;
+    moveStartY = ty;
+    moveCurrentX = tx;
+    moveCurrentY = ty;
+    isMoving = true;
+  } else {
+    // 上半分：照準
+    aimStartX = tx;
+    aimCurrentX = tx;
+    isAiming = true;
+  }
 });
 
 canvas.addEventListener("touchmove", (e) => {
   e.preventDefault();
-  if (!isTouching) return;
   const touch = e.touches[0];
   const r = canvas.getBoundingClientRect();
-  touchCurrentX = (touch.clientX - r.left) * (canvas.width / r.width);
-  touchCurrentY = (touch.clientY - r.top) * (canvas.height / r.height);
+  const tx = (touch.clientX - r.left) * (canvas.width / r.width);
+  const ty = (touch.clientY - r.top) * (canvas.height / r.height);
+
+  if (isMoving) {
+    moveCurrentX = tx;
+    moveCurrentY = ty;
+  }
+  if (isAiming) {
+    aimCurrentX = tx;
+    // 照準オフセットを更新
+    aimOffset += (aimCurrentX - aimStartX) * AIM_SENSITIVITY;
+    aimOffset = Math.max(-0.8, Math.min(0.8, aimOffset)); // 制限
+    aimStartX = aimCurrentX; // 相対移動
+  }
 });
 
 canvas.addEventListener("touchend", (e) => {
   e.preventDefault();
-  isTouching = false;
+  // どのタッチが終わったか判定（シンプルに全部リセット）
+  if (e.touches.length === 0) {
+    isMoving = false;
+    isAiming = false;
+  }
 });
 
 // PC用マウス操作（デバッグ用）
 let isMouseDown = false;
+let mouseIsMove = false;
 
 canvas.addEventListener("mousedown", (e) => {
   const r = canvas.getBoundingClientRect();
   const mx = (e.clientX - r.left) * (canvas.width / r.width);
   const my = (e.clientY - r.top) * (canvas.height / r.height);
-  touchStartX = mx;
-  touchStartY = my;
-  touchCurrentX = mx;
-  touchCurrentY = my;
+
+  if (my > SIZE / 2) {
+    // 下半分：移動
+    moveStartX = mx;
+    moveStartY = my;
+    moveCurrentX = mx;
+    moveCurrentY = my;
+    isMoving = true;
+    mouseIsMove = true;
+  } else {
+    // 上半分：照準
+    aimStartX = mx;
+    aimCurrentX = mx;
+    isAiming = true;
+    mouseIsMove = false;
+  }
   isMouseDown = true;
-  isTouching = true;
 });
 
 canvas.addEventListener("mousemove", (e) => {
   if (!isMouseDown) return;
   const r = canvas.getBoundingClientRect();
-  touchCurrentX = (e.clientX - r.left) * (canvas.width / r.width);
-  touchCurrentY = (e.clientY - r.top) * (canvas.height / r.height);
+  const mx = (e.clientX - r.left) * (canvas.width / r.width);
+
+  if (mouseIsMove) {
+    moveCurrentX = mx;
+    moveCurrentY = (e.clientY - r.top) * (canvas.height / r.height);
+  } else {
+    aimCurrentX = mx;
+    aimOffset += (aimCurrentX - aimStartX) * AIM_SENSITIVITY;
+    aimOffset = Math.max(-0.8, Math.min(0.8, aimOffset));
+    aimStartX = aimCurrentX;
+  }
 });
 
 canvas.addEventListener("mouseup", () => {
   isMouseDown = false;
-  isTouching = false;
+  isMoving = false;
+  isAiming = false;
 });
 
 // スワイプ方向を回転座標系からワールド座標系に変換
@@ -252,10 +306,10 @@ function gameLoop() {
   lastTime = now;
 
   if (myId && myHp > 0) {
-    // スワイプで移動（画面座標をワールド座標に変換）
-    if (isTouching) {
-      const screenDx = touchCurrentX - touchStartX;
-      const screenDy = touchCurrentY - touchStartY;
+    // 下半分スワイプで移動（画面座標をワールド座標に変換）
+    if (isMoving) {
+      const screenDx = moveCurrentX - moveStartX;
+      const screenDy = moveCurrentY - moveStartY;
       const dist = Math.hypot(screenDx, screenDy);
 
       if (dist > 10) { // デッドゾーン
@@ -275,12 +329,12 @@ function gameLoop() {
       }
     }
 
-    // 常時連射（二股発射）- 固定角度で上方向（回転後の画面で上＝敵方向）
+    // 常時連射（二股発射）- 照準オフセット付き
     if (now - lastShotAt >= SHOT_COOLDOWN_MS) {
       lastShotAt = now;
 
-      // 自分のzoneの中心から中心へ向かう方向（固定角度）
-      const shootAngle = getZoneCenterAngle(myZone) + Math.PI; // 中心に向かう方向
+      // 自分のzoneの中心から中心へ向かう方向 + 照準オフセット
+      const shootAngle = getZoneCenterAngle(myZone) + Math.PI + aimOffset;
 
       // 二股
       for (const offset of [-FORK_ANGLE, FORK_ANGLE]) {
@@ -446,20 +500,47 @@ function draw() {
 
   ctx.restore(); // 回転を元に戻す
 
-  // スワイプインジケーター（回転しない、画面座標で描画）
-  if (isTouching) {
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+  // 画面中央の分割線
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, SIZE / 2);
+  ctx.lineTo(SIZE, SIZE / 2);
+  ctx.stroke();
+
+  // 移動インジケーター（下半分）
+  if (isMoving) {
+    ctx.strokeStyle = "rgba(100, 200, 255, 0.4)";
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(touchStartX, touchStartY);
-    ctx.lineTo(touchCurrentX, touchCurrentY);
+    ctx.moveTo(moveStartX, moveStartY);
+    ctx.lineTo(moveCurrentX, moveCurrentY);
     ctx.stroke();
 
-    ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+    ctx.fillStyle = "rgba(100, 200, 255, 0.5)";
     ctx.beginPath();
-    ctx.arc(touchStartX, touchStartY, 10, 0, Math.PI * 2);
+    ctx.arc(moveStartX, moveStartY, 10, 0, Math.PI * 2);
     ctx.fill();
   }
+
+  // 照準インジケーター（上半分）- 照準方向を表示
+  ctx.save();
+  ctx.translate(CENTER_X, SIZE * 0.15);
+  // 照準の矢印
+  const arrowLen = SIZE * 0.08;
+  const arrowAngle = -Math.PI / 2 + aimOffset; // 上向き基準
+  ctx.strokeStyle = "rgba(255, 200, 100, 0.6)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(Math.cos(arrowAngle) * arrowLen, Math.sin(arrowAngle) * arrowLen);
+  ctx.stroke();
+  // 矢印の先端
+  ctx.fillStyle = "rgba(255, 200, 100, 0.6)";
+  ctx.beginPath();
+  ctx.arc(Math.cos(arrowAngle) * arrowLen, Math.sin(arrowAngle) * arrowLen, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 
   // UI（回転しない）
   ctx.fillStyle = "#ddd";
@@ -468,6 +549,12 @@ function draw() {
 
   const playerCount = Object.keys(otherPlayers).length + (myId ? 1 : 0);
   ctx.fillText(`Players: ${playerCount}/3`, SIZE * 0.02, SIZE * 0.09);
+
+  // 操作説明
+  ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
+  ctx.font = `${SIZE * 0.025}px sans-serif`;
+  ctx.fillText("↑照準", SIZE * 0.02, SIZE * 0.48);
+  ctx.fillText("↓移動", SIZE * 0.02, SIZE * 0.54);
 }
 
 function drawHpBarAt(x: number, y: number, hp: number) {
