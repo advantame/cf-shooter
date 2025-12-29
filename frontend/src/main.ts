@@ -19,11 +19,11 @@ const CENTER_X = SIZE / 2;
 const CENTER_Y = SIZE / 2;
 const ARENA_RADIUS = SIZE * 0.45;
 const PLAYER_RADIUS = SIZE * 0.04;
-const SPEED = SIZE * 0.4; // px/sec
-const BULLET_SPEED = SIZE * 0.7;
-const SHOT_COOLDOWN_MS = 120; // 常時連射用に短く
-const FORK_ANGLE = 0.15; // 二股の角度（ラジアン）
-const MAX_HP = 20;
+const SPEED = SIZE * 0.8; // px/sec (2倍)
+const BULLET_SPEED = SIZE * 2.1; // (3倍)
+const SHOT_COOLDOWN_MS = 80; // (1.5倍速 = 120/1.5)
+const FORK_ANGLE = 0.35; // 二股の角度（広めに）
+const MAX_HP = 200; // (10倍)
 
 // 領域の色
 const ZONE_COLORS = ["rgba(0, 229, 255, 0.15)", "rgba(255, 90, 90, 0.15)", "rgba(90, 255, 90, 0.15)"];
@@ -121,6 +121,12 @@ function normalizeAngle(a: number): number {
   return a;
 }
 
+// 自分のzoneが下に来るための回転角度
+function getViewRotation(): number {
+  // 自分のzoneの中心を下（PI/2）に持ってくる
+  const myZoneCenter = getZoneCenterAngle(myZone);
+  return Math.PI / 2 - myZoneCenter;
+}
 
 // 領域内に制限
 function clampToZone(x: number, y: number, zone: number): { x: number; y: number } {
@@ -200,18 +206,16 @@ canvas.addEventListener("touchend", (e) => {
 });
 
 // PC用マウス操作（デバッグ用）
-let mouseX = CENTER_X;
-let mouseY = CENTER_Y;
 let isMouseDown = false;
 
 canvas.addEventListener("mousedown", (e) => {
   const r = canvas.getBoundingClientRect();
-  mouseX = (e.clientX - r.left) * (canvas.width / r.width);
-  mouseY = (e.clientY - r.top) * (canvas.height / r.height);
-  touchStartX = mouseX;
-  touchStartY = mouseY;
-  touchCurrentX = mouseX;
-  touchCurrentY = mouseY;
+  const mx = (e.clientX - r.left) * (canvas.width / r.width);
+  const my = (e.clientY - r.top) * (canvas.height / r.height);
+  touchStartX = mx;
+  touchStartY = my;
+  touchCurrentX = mx;
+  touchCurrentY = my;
   isMouseDown = true;
   isTouching = true;
 });
@@ -228,6 +232,17 @@ canvas.addEventListener("mouseup", () => {
   isTouching = false;
 });
 
+// スワイプ方向を回転座標系からワールド座標系に変換
+function transformSwipeToWorld(dx: number, dy: number): { dx: number; dy: number } {
+  const rotation = -getViewRotation(); // 逆回転
+  const cos = Math.cos(rotation);
+  const sin = Math.sin(rotation);
+  return {
+    dx: dx * cos - dy * sin,
+    dy: dx * sin + dy * cos,
+  };
+}
+
 // ゲームループ
 let lastTime = performance.now();
 
@@ -237,15 +252,18 @@ function gameLoop() {
   lastTime = now;
 
   if (myId && myHp > 0) {
-    // スワイプで移動
+    // スワイプで移動（画面座標をワールド座標に変換）
     if (isTouching) {
-      const dx = touchCurrentX - touchStartX;
-      const dy = touchCurrentY - touchStartY;
-      const dist = Math.hypot(dx, dy);
+      const screenDx = touchCurrentX - touchStartX;
+      const screenDy = touchCurrentY - touchStartY;
+      const dist = Math.hypot(screenDx, screenDy);
 
       if (dist > 10) { // デッドゾーン
-        const vx = (dx / dist) * SPEED;
-        const vy = (dy / dist) * SPEED;
+        // 画面上のスワイプ方向をワールド座標に変換
+        const world = transformSwipeToWorld(screenDx, screenDy);
+        const worldDist = Math.hypot(world.dx, world.dy);
+        const vx = (world.dx / worldDist) * SPEED;
+        const vy = (world.dy / worldDist) * SPEED;
 
         let newX = myX + vx * dt;
         let newY = myY + vy * dt;
@@ -257,18 +275,16 @@ function gameLoop() {
       }
     }
 
-    // 常時連射（二股発射）
+    // 常時連射（二股発射）- 固定角度で上方向（回転後の画面で上＝敵方向）
     if (now - lastShotAt >= SHOT_COOLDOWN_MS) {
       lastShotAt = now;
 
-      // 中心に向かって発射
-      const toCenterX = CENTER_X - myX;
-      const toCenterY = CENTER_Y - myY;
-      const baseAngle = Math.atan2(toCenterY, toCenterX);
+      // 自分のzoneの中心から中心へ向かう方向（固定角度）
+      const shootAngle = getZoneCenterAngle(myZone) + Math.PI; // 中心に向かう方向
 
       // 二股
       for (const offset of [-FORK_ANGLE, FORK_ANGLE]) {
-        const angle = baseAngle + offset;
+        const angle = shootAngle + offset;
         const bvx = Math.cos(angle) * BULLET_SPEED;
         const bvy = Math.sin(angle) * BULLET_SPEED;
         myBullets.push({ x: myX, y: myY, vx: bvx, vy: bvy });
@@ -331,6 +347,12 @@ function draw() {
   ctx.fillStyle = "#111";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+  // 回転して描画（自分のzoneが下に来るように）
+  ctx.save();
+  ctx.translate(CENTER_X, CENTER_Y);
+  ctx.rotate(getViewRotation());
+  ctx.translate(-CENTER_X, -CENTER_Y);
+
   // アリーナ円
   ctx.strokeStyle = "#333";
   ctx.lineWidth = 2;
@@ -386,8 +408,12 @@ function draw() {
     ctx.arc(p.x, p.y, PLAYER_RADIUS, 0, Math.PI * 2);
     ctx.fill();
 
-    // HPバー
-    drawHpBar(p.x, p.y - PLAYER_RADIUS - 10, p.hp);
+    // HPバー（回転を打ち消して水平に描画）
+    ctx.save();
+    ctx.translate(p.x, p.y - PLAYER_RADIUS - 10);
+    ctx.rotate(-getViewRotation());
+    drawHpBarAt(0, 0, p.hp);
+    ctx.restore();
 
     ctx.globalAlpha = 1;
   }
@@ -408,13 +434,19 @@ function draw() {
     ctx.arc(myX, myY, PLAYER_RADIUS + 4, 0, Math.PI * 2);
     ctx.stroke();
 
-    // HPバー
-    drawHpBar(myX, myY - PLAYER_RADIUS - 10, myHp);
+    // HPバー（回転を打ち消して水平に描画）
+    ctx.save();
+    ctx.translate(myX, myY - PLAYER_RADIUS - 10);
+    ctx.rotate(-getViewRotation());
+    drawHpBarAt(0, 0, myHp);
+    ctx.restore();
 
     ctx.globalAlpha = 1;
   }
 
-  // スワイプインジケーター
+  ctx.restore(); // 回転を元に戻す
+
+  // スワイプインジケーター（回転しない、画面座標で描画）
   if (isTouching) {
     ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
     ctx.lineWidth = 2;
@@ -429,7 +461,7 @@ function draw() {
     ctx.fill();
   }
 
-  // UI
+  // UI（回転しない）
   ctx.fillStyle = "#ddd";
   ctx.font = `${SIZE * 0.03}px sans-serif`;
   ctx.fillText(`room=${room}  ${connectionStatus}`, SIZE * 0.02, SIZE * 0.05);
@@ -438,7 +470,7 @@ function draw() {
   ctx.fillText(`Players: ${playerCount}/3`, SIZE * 0.02, SIZE * 0.09);
 }
 
-function drawHpBar(x: number, y: number, hp: number) {
+function drawHpBarAt(x: number, y: number, hp: number) {
   const barWidth = PLAYER_RADIUS * 2.5;
   const barHeight = SIZE * 0.015;
   const ratio = hp / MAX_HP;
