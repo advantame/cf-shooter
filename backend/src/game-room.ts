@@ -4,13 +4,24 @@ export type Env = {
 
 // クライアントから受信するメッセージ
 type ClientMsg =
-  | { type: "state"; id: string; x: number; y: number; hp: number; zone: number; bullets: { x: number; y: number; vx: number; vy: number }[] }
+  | {
+      type: "state";
+      id: string;
+      x: number;
+      y: number;
+      hp: number;
+      zone: number;
+      bullets: { x: number; y: number; vx: number; vy: number }[];
+      specialBullets?: { type: string; x: number; y: number; vx: number; vy: number }[];
+      beams?: { angle: number; time: number }[];
+      shield?: boolean;
+    }
   | { type: "hit"; targetId: string };
 
 // サーバーから送信するメッセージ
 type ServerMsg =
   | { type: "hello"; playerId: string; zone: number }
-  | { type: "players"; players: Record<string, { x: number; y: number; hp: number; zone: number; bullets: { x: number; y: number }[] }> }
+  | { type: "players"; players: Record<string, PlayerState> }
   | { type: "hit"; targetId: string; fromId: string }
   | { type: "error"; message: string };
 
@@ -21,6 +32,9 @@ type PlayerState = {
   y: number;
   hp: number;
   bullets: { x: number; y: number }[];
+  specialBullets: { type: string; x: number; y: number; vx: number; vy: number }[];
+  beams: { angle: number; time: number }[];
+  shield: boolean;
 };
 
 export class GameRoom implements DurableObject {
@@ -67,6 +81,9 @@ export class GameRoom implements DurableObject {
       y: 0,
       hp: 20,
       bullets: [],
+      specialBullets: [],
+      beams: [],
+      shield: false,
     };
     this.players.set(server, initialState);
 
@@ -95,6 +112,9 @@ export class GameRoom implements DurableObject {
       p.y = msg.y;
       p.hp = msg.hp;
       p.bullets = msg.bullets.map(b => ({ x: b.x, y: b.y }));
+      p.specialBullets = msg.specialBullets ?? [];
+      p.beams = msg.beams ?? [];
+      p.shield = msg.shield ?? false;
     } else if (msg.type === "hit") {
       const hitMsg: ServerMsg = { type: "hit", targetId: msg.targetId, fromId: p.id };
       for (const ws2 of this.players.keys()) {
@@ -135,9 +155,19 @@ export class GameRoom implements DurableObject {
   }
 
   private broadcast() {
-    const playersObj: Record<string, { x: number; y: number; hp: number; zone: number; bullets: { x: number; y: number }[] }> = {};
+    const playersObj: Record<string, PlayerState> = {};
     for (const p of this.players.values()) {
-      playersObj[p.id] = { x: p.x, y: p.y, hp: p.hp, zone: p.zone, bullets: p.bullets };
+      playersObj[p.id] = {
+        id: p.id,
+        x: p.x,
+        y: p.y,
+        hp: p.hp,
+        zone: p.zone,
+        bullets: p.bullets,
+        specialBullets: p.specialBullets,
+        beams: p.beams,
+        shield: p.shield,
+      };
     }
 
     const payload: ServerMsg = { type: "players", players: playersObj };

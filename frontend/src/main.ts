@@ -107,32 +107,16 @@ let myHp = MAX_HP;
 let myBullets: { x: number; y: number; vx: number; vy: number }[] = [];
 let lastShotAt = 0;
 
-// 他プレイヤーの状態（ヒット判定用）
+// 他プレイヤーの状態
 type OtherPlayer = {
   x: number; y: number;
   hp: number; zone: number;
   bullets: { x: number; y: number }[];
-  specialBullets?: { type: WeaponId; x: number; y: number; vx: number; vy: number }[];
-  beams?: { angle: number; time: number }[];
-  shield?: boolean;
-};
-let otherPlayers: Record<string, OtherPlayer> = {};
-
-// 他プレイヤーの描画用状態（補間用）
-type DisplayPlayer = {
-  x: number; y: number;
-  hp: number; zone: number;
-  bullets: { x: number; y: number }[];
-  specialBullets: { type: WeaponId; x: number; y: number; vx: number; vy: number }[];
+  specialBullets: { type: string; x: number; y: number; vx: number; vy: number }[];
   beams: { angle: number; time: number }[];
   shield: boolean;
 };
-let otherPlayersDisplay: Record<string, DisplayPlayer> = {};
-const LERP_SPEED = 18; // 補間速度（高いほど速く追従）
-
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
+let otherPlayers: Record<string, OtherPlayer> = {};
 
 let connectionStatus = "接続中...";
 
@@ -876,59 +860,6 @@ function gameLoop() {
     }));
   }
 
-  // 他プレイヤーの表示位置を補間
-  const lerpT = Math.min(1, LERP_SPEED * dt);
-  for (const [id, target] of Object.entries(otherPlayers)) {
-    if (!otherPlayersDisplay[id]) {
-      // 新規プレイヤー：即座に位置を設定
-      otherPlayersDisplay[id] = {
-        x: target.x,
-        y: target.y,
-        hp: target.hp,
-        zone: target.zone,
-        bullets: target.bullets.map(b => ({ x: b.x, y: b.y })),
-        specialBullets: target.specialBullets ?? [],
-        beams: target.beams ?? [],
-        shield: target.shield ?? false,
-      };
-    } else {
-      // 既存プレイヤー：滑らかに補間
-      const display = otherPlayersDisplay[id];
-      display.x = lerp(display.x, target.x, lerpT);
-      display.y = lerp(display.y, target.y, lerpT);
-      display.hp = target.hp;
-      display.zone = target.zone;
-
-      // 弾の補間
-      const newBullets: { x: number; y: number }[] = [];
-      for (let i = 0; i < target.bullets.length; i++) {
-        const tb = target.bullets[i];
-        if (display.bullets[i]) {
-          // 既存の弾：補間
-          newBullets.push({
-            x: lerp(display.bullets[i].x, tb.x, lerpT),
-            y: lerp(display.bullets[i].y, tb.y, lerpT),
-          });
-        } else {
-          // 新規の弾：即座に位置を設定
-          newBullets.push({ x: tb.x, y: tb.y });
-        }
-      }
-      display.bullets = newBullets;
-
-      // 特殊弾・ビーム・シールド（補間なし）
-      display.specialBullets = target.specialBullets ?? [];
-      display.beams = target.beams ?? [];
-      display.shield = target.shield ?? false;
-    }
-  }
-  // 切断したプレイヤーを削除
-  for (const id of Object.keys(otherPlayersDisplay)) {
-    if (!otherPlayers[id]) {
-      delete otherPlayersDisplay[id];
-    }
-  }
-
   requestAnimationFrame(gameLoop);
 }
 
@@ -976,7 +907,7 @@ function draw() {
   }
 
   // 他プレイヤーの弾（補間された位置で描画）
-  for (const p of Object.values(otherPlayersDisplay)) {
+  for (const p of Object.values(otherPlayers)) {
     ctx.fillStyle = PLAYER_COLORS[p.zone] || "#ff6600";
     for (const b of p.bullets) {
       ctx.beginPath();
@@ -986,7 +917,7 @@ function draw() {
   }
 
   // 他プレイヤーの特殊弾
-  for (const p of Object.values(otherPlayersDisplay)) {
+  for (const p of Object.values(otherPlayers)) {
     for (const b of p.specialBullets) {
       const weapon = WEAPONS.find(w => w.id === b.type);
       if (!weapon) continue;
@@ -1012,7 +943,7 @@ function draw() {
   }
 
   // 他プレイヤーのビームエフェクト
-  for (const p of Object.values(otherPlayersDisplay)) {
+  for (const p of Object.values(otherPlayers)) {
     for (const beam of p.beams) {
       const alpha = Math.min(1, (beam.time - now) / 300);
       if (alpha <= 0) continue;
@@ -1116,7 +1047,7 @@ function draw() {
   }
 
   // 他プレイヤー（補間された位置で描画）
-  for (const p of Object.values(otherPlayersDisplay)) {
+  for (const p of Object.values(otherPlayers)) {
     ctx.fillStyle = PLAYER_COLORS[p.zone] || "#ff5a5a";
 
     if (p.hp <= 0) ctx.globalAlpha = 0.3;
