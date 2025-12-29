@@ -48,7 +48,7 @@ type Weapon = {
 const WEAPONS: Weapon[] = [
   { id: "grenade", name: "グレネード", mark: "hexagon", damage: 40, cooldown: 5000, color: "#ff6600", lastUsedAt: -Infinity },
   { id: "beam", name: "ビーム", mark: "diamond", damage: 60, cooldown: 8000, color: "#00ffff", lastUsedAt: -Infinity },
-  { id: "shotgun", name: "ショットガン", mark: "triangle", damage: 8, cooldown: 3000, color: "#ffff00", lastUsedAt: -Infinity },
+  { id: "shotgun", name: "ショットガン", mark: "triangle", damage: 8, cooldown: 8000, color: "#ffff00", lastUsedAt: -Infinity },
   { id: "missile", name: "ミサイル", mark: "star", damage: 35, cooldown: 6000, color: "#ff00ff", lastUsedAt: -Infinity },
   { id: "shield", name: "シールド", mark: "circle", damage: 0, cooldown: 10000, color: "#00ff00", lastUsedAt: -Infinity },
 ];
@@ -627,7 +627,7 @@ function executeBeamFire(warning: BeamWarning) {
 const SHOTGUN_PARENT_SPEED = SIZE * 0.15; // さらに遅い弾
 const SHOTGUN_CHILD_SPEED = SIZE * 0.6; // 遅い子弾
 const SHOTGUN_CHILD_INTERVAL = 700; // 700msごとに発射
-const SHOTGUN_DURATION = 3000; // 3秒間持続
+const SHOTGUN_DURATION = 8000; // 8秒間持続
 
 function fireShotgun(centerAngle: number) {
   const now = performance.now();
