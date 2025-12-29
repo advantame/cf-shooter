@@ -1,29 +1,55 @@
 const canvas = document.createElement("canvas");
-canvas.width = 800;
-canvas.height = 600;
+// スマホ向け：正方形キャンバス
+const SIZE = Math.min(window.innerWidth, window.innerHeight);
+canvas.width = SIZE;
+canvas.height = SIZE;
 document.body.style.margin = "0";
 document.body.style.background = "#000";
 document.body.style.display = "flex";
 document.body.style.justifyContent = "center";
 document.body.style.alignItems = "center";
 document.body.style.height = "100vh";
+document.body.style.overflow = "hidden";
+document.body.style.touchAction = "none";
 document.body.appendChild(canvas);
 const ctx = canvas.getContext("2d")!;
 
-// バックエンドURL（環境変数から、なければ同一オリジン）
-const BACKEND_BASE = (import.meta as any).env?.VITE_BACKEND_BASE ?? "";
+// ゲーム定数
+const CENTER_X = SIZE / 2;
+const CENTER_Y = SIZE / 2;
+const ARENA_RADIUS = SIZE * 0.45;
+const PLAYER_RADIUS = SIZE * 0.04;
+const SPEED = SIZE * 0.4; // px/sec
+const BULLET_SPEED = SIZE * 0.7;
+const SHOT_COOLDOWN_MS = 120; // 常時連射用に短く
+const FORK_ANGLE = 0.15; // 二股の角度（ラジアン）
+const MAX_HP = 20;
 
+// 領域の色
+const ZONE_COLORS = ["rgba(0, 229, 255, 0.15)", "rgba(255, 90, 90, 0.15)", "rgba(90, 255, 90, 0.15)"];
+const PLAYER_COLORS = ["#00e5ff", "#ff5a5a", "#5aff5a"];
+
+// バックエンドURL
+const BACKEND_BASE = (import.meta as any).env?.VITE_BACKEND_BASE ?? "";
 const params = new URLSearchParams(location.search);
 const room = params.get("room") ?? "lobby";
 
+// 自分の状態
 let myId: string | null = null;
-let lastState: any = null;
+let myZone = 0; // 0, 1, 2 のいずれか（サーバーから割り当て）
+let myX = CENTER_X;
+let myY = CENTER_Y;
+let myHp = MAX_HP;
+let myBullets: { x: number; y: number; vx: number; vy: number }[] = [];
+let lastShotAt = 0;
+
+// 他プレイヤーの状態
+let otherPlayers: Record<string, { x: number; y: number; hp: number; zone: number; bullets: { x: number; y: number }[] }> = {};
+
 let connectionStatus = "接続中...";
 
 const wsUrl = new URL("/connect", BACKEND_BASE || location.origin);
 wsUrl.searchParams.set("room", room);
-
-// http(s) -> ws(s)
 wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
 
 let ws: WebSocket;
@@ -37,8 +63,28 @@ function connect() {
 
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
-    if (msg.type === "hello") myId = msg.playerId;
-    if (msg.type === "state") lastState = msg;
+    if (msg.type === "hello") {
+      myId = msg.playerId;
+      myZone = msg.zone;
+      // 初期位置を自分の領域の中央に
+      const angle = getZoneCenterAngle(myZone);
+      const dist = ARENA_RADIUS * 0.6;
+      myX = CENTER_X + Math.cos(angle) * dist;
+      myY = CENTER_Y + Math.sin(angle) * dist;
+      myHp = MAX_HP;
+      myBullets = [];
+    }
+    if (msg.type === "players") {
+      otherPlayers = {};
+      for (const [id, p] of Object.entries<any>(msg.players)) {
+        if (id !== myId) {
+          otherPlayers[id] = p;
+        }
+      }
+    }
+    if (msg.type === "hit" && msg.targetId === myId) {
+      myHp = Math.max(0, myHp - 1);
+    }
   };
 
   ws.onclose = () => {
@@ -53,59 +99,251 @@ function connect() {
 
 connect();
 
-const input = { up: false, down: false, left: false, right: false, shoot: false, aimX: 400, aimY: 300 };
-let seq = 0;
+// 領域の中心角度を取得（ラジアン）
+function getZoneCenterAngle(zone: number): number {
+  // zone 0: 上, zone 1: 右下, zone 2: 左下
+  return (-Math.PI / 2) + (zone * Math.PI * 2 / 3);
+}
 
-window.addEventListener("keydown", (e) => {
-  if (e.key === "w" || e.key === "ArrowUp") input.up = true;
-  if (e.key === "s" || e.key === "ArrowDown") input.down = true;
-  if (e.key === "a" || e.key === "ArrowLeft") input.left = true;
-  if (e.key === "d" || e.key === "ArrowRight") input.right = true;
-  if (e.key === " ") input.shoot = true;
-});
+// 領域の開始・終了角度
+function getZoneAngles(zone: number): { start: number; end: number } {
+  const center = getZoneCenterAngle(zone);
+  return {
+    start: center - Math.PI / 3,
+    end: center + Math.PI / 3,
+  };
+}
 
-window.addEventListener("keyup", (e) => {
-  if (e.key === "w" || e.key === "ArrowUp") input.up = false;
-  if (e.key === "s" || e.key === "ArrowDown") input.down = false;
-  if (e.key === "a" || e.key === "ArrowLeft") input.left = false;
-  if (e.key === "d" || e.key === "ArrowRight") input.right = false;
-  if (e.key === " ") input.shoot = false;
-});
+// 角度を正規化（-PI ~ PI）
+function normalizeAngle(a: number): number {
+  while (a > Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
 
-canvas.addEventListener("mousemove", (e) => {
-  const r = canvas.getBoundingClientRect();
-  input.aimX = (e.clientX - r.left) * (canvas.width / r.width);
-  input.aimY = (e.clientY - r.top) * (canvas.height / r.height);
-});
+// 点が領域内にあるか判定
+function isInZone(x: number, y: number, zone: number): boolean {
+  const dx = x - CENTER_X;
+  const dy = y - CENTER_Y;
+  const dist = Math.hypot(dx, dy);
+  if (dist > ARENA_RADIUS) return false;
 
-canvas.addEventListener("mousedown", () => input.shoot = true);
-canvas.addEventListener("mouseup", () => input.shoot = false);
+  const angle = Math.atan2(dy, dx);
+  const { start, end } = getZoneAngles(zone);
 
-// タッチ対応
+  // 角度が範囲内か
+  const normAngle = normalizeAngle(angle);
+  const normStart = normalizeAngle(start);
+  const normEnd = normalizeAngle(end);
+
+  if (normStart < normEnd) {
+    return normAngle >= normStart && normAngle <= normEnd;
+  } else {
+    // 範囲が-PI/PIをまたぐ場合
+    return normAngle >= normStart || normAngle <= normEnd;
+  }
+}
+
+// 領域内に制限
+function clampToZone(x: number, y: number, zone: number): { x: number; y: number } {
+  let dx = x - CENTER_X;
+  let dy = y - CENTER_Y;
+  let dist = Math.hypot(dx, dy);
+  let angle = Math.atan2(dy, dx);
+
+  // 距離を制限
+  const minDist = PLAYER_RADIUS * 2;
+  const maxDist = ARENA_RADIUS - PLAYER_RADIUS;
+  dist = Math.max(minDist, Math.min(maxDist, dist));
+
+  // 角度を制限
+  const { start, end } = getZoneAngles(zone);
+  const margin = 0.05; // 少し余裕
+  const clampedStart = start + margin;
+  const clampedEnd = end - margin;
+
+  const normAngle = normalizeAngle(angle);
+  const normStart = normalizeAngle(clampedStart);
+  const normEnd = normalizeAngle(clampedEnd);
+
+  let clampedAngle = normAngle;
+  if (normStart < normEnd) {
+    clampedAngle = Math.max(normStart, Math.min(normEnd, normAngle));
+  } else {
+    // 範囲が-PI/PIをまたぐ場合
+    if (normAngle < normEnd) {
+      clampedAngle = normAngle;
+    } else if (normAngle > normStart) {
+      clampedAngle = normAngle;
+    } else {
+      // 範囲外：近い方に寄せる
+      const distToStart = Math.abs(normalizeAngle(normAngle - normStart));
+      const distToEnd = Math.abs(normalizeAngle(normAngle - normEnd));
+      clampedAngle = distToStart < distToEnd ? normStart : normEnd;
+    }
+  }
+
+  return {
+    x: CENTER_X + Math.cos(clampedAngle) * dist,
+    y: CENTER_Y + Math.sin(clampedAngle) * dist,
+  };
+}
+
+// スワイプ操作
+let touchStartX = 0;
+let touchStartY = 0;
+let touchCurrentX = 0;
+let touchCurrentY = 0;
+let isTouching = false;
+
 canvas.addEventListener("touchstart", (e) => {
   e.preventDefault();
-  input.shoot = true;
   const touch = e.touches[0];
   const r = canvas.getBoundingClientRect();
-  input.aimX = (touch.clientX - r.left) * (canvas.width / r.width);
-  input.aimY = (touch.clientY - r.top) * (canvas.height / r.height);
+  touchStartX = (touch.clientX - r.left) * (canvas.width / r.width);
+  touchStartY = (touch.clientY - r.top) * (canvas.height / r.height);
+  touchCurrentX = touchStartX;
+  touchCurrentY = touchStartY;
+  isTouching = true;
 });
 
 canvas.addEventListener("touchmove", (e) => {
   e.preventDefault();
+  if (!isTouching) return;
   const touch = e.touches[0];
   const r = canvas.getBoundingClientRect();
-  input.aimX = (touch.clientX - r.left) * (canvas.width / r.width);
-  input.aimY = (touch.clientY - r.top) * (canvas.height / r.height);
+  touchCurrentX = (touch.clientX - r.left) * (canvas.width / r.width);
+  touchCurrentY = (touch.clientY - r.top) * (canvas.height / r.height);
 });
 
-canvas.addEventListener("touchend", () => input.shoot = false);
+canvas.addEventListener("touchend", (e) => {
+  e.preventDefault();
+  isTouching = false;
+});
 
-// 入力送信（30Hz程度）
-setInterval(() => {
-  if (ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: "input", seq: seq++, ...input }));
-}, 33);
+// PC用マウス操作（デバッグ用）
+let mouseX = CENTER_X;
+let mouseY = CENTER_Y;
+let isMouseDown = false;
+
+canvas.addEventListener("mousedown", (e) => {
+  const r = canvas.getBoundingClientRect();
+  mouseX = (e.clientX - r.left) * (canvas.width / r.width);
+  mouseY = (e.clientY - r.top) * (canvas.height / r.height);
+  touchStartX = mouseX;
+  touchStartY = mouseY;
+  touchCurrentX = mouseX;
+  touchCurrentY = mouseY;
+  isMouseDown = true;
+  isTouching = true;
+});
+
+canvas.addEventListener("mousemove", (e) => {
+  if (!isMouseDown) return;
+  const r = canvas.getBoundingClientRect();
+  touchCurrentX = (e.clientX - r.left) * (canvas.width / r.width);
+  touchCurrentY = (e.clientY - r.top) * (canvas.height / r.height);
+});
+
+canvas.addEventListener("mouseup", () => {
+  isMouseDown = false;
+  isTouching = false;
+});
+
+// ゲームループ
+let lastTime = performance.now();
+
+function gameLoop() {
+  const now = performance.now();
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+
+  if (myId && myHp > 0) {
+    // スワイプで移動
+    if (isTouching) {
+      const dx = touchCurrentX - touchStartX;
+      const dy = touchCurrentY - touchStartY;
+      const dist = Math.hypot(dx, dy);
+
+      if (dist > 10) { // デッドゾーン
+        const vx = (dx / dist) * SPEED;
+        const vy = (dy / dist) * SPEED;
+
+        let newX = myX + vx * dt;
+        let newY = myY + vy * dt;
+
+        // 領域内に制限
+        const clamped = clampToZone(newX, newY, myZone);
+        myX = clamped.x;
+        myY = clamped.y;
+      }
+    }
+
+    // 常時連射（二股発射）
+    if (now - lastShotAt >= SHOT_COOLDOWN_MS) {
+      lastShotAt = now;
+
+      // 中心に向かって発射
+      const toCenterX = CENTER_X - myX;
+      const toCenterY = CENTER_Y - myY;
+      const baseAngle = Math.atan2(toCenterY, toCenterX);
+
+      // 二股
+      for (const offset of [-FORK_ANGLE, FORK_ANGLE]) {
+        const angle = baseAngle + offset;
+        const bvx = Math.cos(angle) * BULLET_SPEED;
+        const bvy = Math.sin(angle) * BULLET_SPEED;
+        myBullets.push({ x: myX, y: myY, vx: bvx, vy: bvy });
+      }
+    }
+  }
+
+  // 弾の更新
+  for (const b of myBullets) {
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+  }
+
+  // 画面外・アリーナ外の弾を除去
+  myBullets = myBullets.filter(b => {
+    const dx = b.x - CENTER_X;
+    const dy = b.y - CENTER_Y;
+    return Math.hypot(dx, dy) <= ARENA_RADIUS + 50;
+  });
+
+  // 当たり判定（自分の弾 vs 他プレイヤー）
+  for (const b of myBullets) {
+    for (const [id, p] of Object.entries(otherPlayers)) {
+      if (p.hp <= 0) continue;
+      const dx = p.x - b.x;
+      const dy = p.y - b.y;
+      const hitRadius = PLAYER_RADIUS * 1.2;
+      if (dx * dx + dy * dy <= hitRadius * hitRadius) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "hit", targetId: id }));
+        }
+        b.x = 1e9;
+        b.y = 1e9;
+      }
+    }
+  }
+  myBullets = myBullets.filter(b => b.x < 1e8);
+
+  // 自分の状態をサーバーに送信
+  if (ws.readyState === WebSocket.OPEN && myId) {
+    ws.send(JSON.stringify({
+      type: "state",
+      id: myId,
+      x: myX,
+      y: myY,
+      hp: myHp,
+      zone: myZone,
+      bullets: myBullets,
+    }));
+  }
+
+  requestAnimationFrame(gameLoop);
+}
 
 function draw() {
   requestAnimationFrame(draw);
@@ -115,49 +353,127 @@ function draw() {
   ctx.fillStyle = "#111";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // ルーム表示
-  ctx.fillStyle = "#ddd";
-  ctx.font = "14px sans-serif";
-  ctx.fillText(`room=${room}  ${connectionStatus}  myId=${myId?.slice(0, 8) ?? "..."}`, 10, 20);
-  ctx.fillText("操作: WASD/矢印キーで移動、スペース/クリックで射撃", 10, 40);
+  // アリーナ円
+  ctx.strokeStyle = "#333";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(CENTER_X, CENTER_Y, ARENA_RADIUS, 0, Math.PI * 2);
+  ctx.stroke();
 
-  if (!lastState) return;
+  // 3分割ピザ領域
+  for (let zone = 0; zone < 3; zone++) {
+    const { start, end } = getZoneAngles(zone);
 
-  // 弾
-  ctx.fillStyle = "#f5d000";
-  for (const b of lastState.bullets) {
+    ctx.fillStyle = zone === myZone ? ZONE_COLORS[zone].replace("0.15", "0.25") : ZONE_COLORS[zone];
     ctx.beginPath();
-    ctx.arc(b.x, b.y, 5, 0, Math.PI * 2);
+    ctx.moveTo(CENTER_X, CENTER_Y);
+    ctx.arc(CENTER_X, CENTER_Y, ARENA_RADIUS, start, end);
+    ctx.closePath();
+    ctx.fill();
+
+    // 境界線
+    ctx.strokeStyle = "#444";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(CENTER_X, CENTER_Y);
+    ctx.lineTo(CENTER_X + Math.cos(start) * ARENA_RADIUS, CENTER_Y + Math.sin(start) * ARENA_RADIUS);
+    ctx.stroke();
+  }
+
+  // 他プレイヤーの弾
+  for (const p of Object.values(otherPlayers)) {
+    ctx.fillStyle = PLAYER_COLORS[p.zone] || "#ff6600";
+    for (const b of p.bullets) {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, SIZE * 0.012, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // 自分の弾
+  ctx.fillStyle = PLAYER_COLORS[myZone];
+  for (const b of myBullets) {
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, SIZE * 0.012, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // プレイヤー
-  const colors = ["#00e5ff", "#ff5a5a", "#5aff5a", "#ff5aff"];
-  let colorIndex = 0;
-  for (const [id, p] of Object.entries<any>(lastState.players)) {
-    const isMe = id === myId;
-    ctx.fillStyle = isMe ? "#00e5ff" : colors[colorIndex++ % colors.length];
+  // 他プレイヤー
+  for (const [id, p] of Object.entries(otherPlayers)) {
+    ctx.fillStyle = PLAYER_COLORS[p.zone] || "#ff5a5a";
 
-    // 死亡時は半透明
     if (p.hp <= 0) ctx.globalAlpha = 0.3;
 
     ctx.beginPath();
-    ctx.arc(p.x, p.y, 16, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, PLAYER_RADIUS, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.globalAlpha = 1;
+    // HPバー
+    drawHpBar(p.x, p.y - PLAYER_RADIUS - 10, p.hp);
 
-    // ID・HP表示
-    ctx.fillStyle = "#fff";
-    ctx.font = "12px sans-serif";
-    const label = isMe ? `YOU (HP:${p.hp})` : `${id.slice(0, 4)} HP:${p.hp}`;
-    ctx.fillText(label, p.x - 30, p.y - 22);
+    ctx.globalAlpha = 1;
   }
 
-  // プレイヤー数表示
-  const playerCount = Object.keys(lastState.players).length;
-  ctx.fillStyle = "#aaa";
-  ctx.fillText(`プレイヤー: ${playerCount}/3`, canvas.width - 100, 20);
+  // 自分
+  if (myId) {
+    ctx.fillStyle = PLAYER_COLORS[myZone];
+    if (myHp <= 0) ctx.globalAlpha = 0.3;
+
+    ctx.beginPath();
+    ctx.arc(myX, myY, PLAYER_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 自分マーク
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(myX, myY, PLAYER_RADIUS + 4, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // HPバー
+    drawHpBar(myX, myY - PLAYER_RADIUS - 10, myHp);
+
+    ctx.globalAlpha = 1;
+  }
+
+  // スワイプインジケーター
+  if (isTouching) {
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(touchStartX, touchStartY);
+    ctx.lineTo(touchCurrentX, touchCurrentY);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(255, 255, 255, 0.5)";
+    ctx.beginPath();
+    ctx.arc(touchStartX, touchStartY, 10, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // UI
+  ctx.fillStyle = "#ddd";
+  ctx.font = `${SIZE * 0.03}px sans-serif`;
+  ctx.fillText(`room=${room}  ${connectionStatus}`, SIZE * 0.02, SIZE * 0.05);
+
+  const playerCount = Object.keys(otherPlayers).length + (myId ? 1 : 0);
+  ctx.fillText(`Players: ${playerCount}/3`, SIZE * 0.02, SIZE * 0.09);
 }
 
+function drawHpBar(x: number, y: number, hp: number) {
+  const barWidth = PLAYER_RADIUS * 2.5;
+  const barHeight = SIZE * 0.015;
+  const ratio = hp / MAX_HP;
+
+  // 背景
+  ctx.fillStyle = "#333";
+  ctx.fillRect(x - barWidth / 2, y - barHeight / 2, barWidth, barHeight);
+
+  // HP
+  ctx.fillStyle = ratio > 0.5 ? "#5f5" : ratio > 0.25 ? "#ff5" : "#f55";
+  ctx.fillRect(x - barWidth / 2, y - barHeight / 2, barWidth * ratio, barHeight);
+}
+
+// 開始
+gameLoop();
 draw();

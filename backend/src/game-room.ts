@@ -2,52 +2,44 @@ export type Env = {
   GAME_ROOMS: DurableObjectNamespace;
 };
 
+// クライアントから受信するメッセージ
 type ClientMsg =
-  | { type: "input"; seq: number; up: boolean; down: boolean; left: boolean; right: boolean; shoot: boolean; aimX: number; aimY: number }
-  | { type: "ping"; t: number };
+  | { type: "state"; id: string; x: number; y: number; hp: number; zone: number; bullets: { x: number; y: number; vx: number; vy: number }[] }
+  | { type: "hit"; targetId: string };
 
+// サーバーから送信するメッセージ
 type ServerMsg =
-  | { type: "hello"; playerId: string }
-  | { type: "state"; t: number; players: Record<string, { x: number; y: number; hp: number }>; bullets: { x: number; y: number }[] }
+  | { type: "hello"; playerId: string; zone: number }
+  | { type: "players"; players: Record<string, { x: number; y: number; hp: number; zone: number; bullets: { x: number; y: number }[] }> }
+  | { type: "hit"; targetId: string; fromId: string }
   | { type: "error"; message: string };
 
-type Player = {
+type PlayerState = {
   id: string;
+  zone: number;
   x: number;
   y: number;
   hp: number;
-  lastInput?: ClientMsg & { type: "input" };
-  lastShotAt: number;
+  bullets: { x: number; y: number }[];
 };
-
-type Bullet = { x: number; y: number; vx: number; vy: number; owner: string };
 
 export class GameRoom implements DurableObject {
   private state: DurableObjectState;
-  private players = new Map<WebSocket, Player>();
-  private bullets: Bullet[] = [];
-  private tickHandle: number | null = null;
-
-  // ゲーム定数
-  private readonly TICK_MS = 50; // 20Hz
-  private readonly SPEED = 180;  // px/sec
-  private readonly BULLET_SPEED = 420;
-  private readonly SHOT_COOLDOWN_MS = 180;
-  private readonly MAP_W = 800;
-  private readonly MAP_H = 600;
+  private players = new Map<WebSocket, PlayerState>();
+  private usedZones = new Set<number>();
   private readonly MAX_PLAYERS = 3;
+  private broadcastHandle: number | null = null;
+  private readonly BROADCAST_MS = 33; // ~30Hz
 
   constructor(state: DurableObjectState) {
     this.state = state;
   }
 
   async fetch(request: Request): Promise<Response> {
-    // WebSocket upgradeのみ受ける
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected websocket", { status: 400 });
     }
 
-    // 3人制限
     if (this.players.size >= this.MAX_PLAYERS) {
       return new Response("Room is full", { status: 503 });
     }
@@ -57,25 +49,34 @@ export class GameRoom implements DurableObject {
 
     this.state.acceptWebSocket(server);
 
-    // 接続時にプレイヤー作成
+    // 空いているzoneを割り当て
+    let zone = 0;
+    for (let i = 0; i < 3; i++) {
+      if (!this.usedZones.has(i)) {
+        zone = i;
+        break;
+      }
+    }
+    this.usedZones.add(zone);
+
     const playerId = crypto.randomUUID();
-    const p: Player = {
+    const initialState: PlayerState = {
       id: playerId,
-      x: 80 + Math.random() * 640,
-      y: 80 + Math.random() * 440,
-      hp: 5,
-      lastShotAt: 0,
+      zone,
+      x: 0,
+      y: 0,
+      hp: 20,
+      bullets: [],
     };
-    this.players.set(server, p);
+    this.players.set(server, initialState);
 
-    server.send(JSON.stringify({ type: "hello", playerId } satisfies ServerMsg));
+    server.send(JSON.stringify({ type: "hello", playerId, zone } satisfies ServerMsg));
 
-    this.ensureTicking();
+    this.ensureBroadcasting();
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // WebSocketイベント（Durable ObjectsのWebSocket API）
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const text = typeof message === "string" ? message : new TextDecoder().decode(message);
     let msg: ClientMsg;
@@ -89,114 +90,61 @@ export class GameRoom implements DurableObject {
     const p = this.players.get(ws);
     if (!p) return;
 
-    if (msg.type === "input") {
-      // 入力は最後のものだけ保持（最小構成）
-      p.lastInput = msg;
-    } else if (msg.type === "ping") {
-      // 必要ならpong実装（今回は省略）
+    if (msg.type === "state") {
+      p.x = msg.x;
+      p.y = msg.y;
+      p.hp = msg.hp;
+      p.bullets = msg.bullets.map(b => ({ x: b.x, y: b.y }));
+    } else if (msg.type === "hit") {
+      const hitMsg: ServerMsg = { type: "hit", targetId: msg.targetId, fromId: p.id };
+      for (const ws2 of this.players.keys()) {
+        try { ws2.send(JSON.stringify(hitMsg)); } catch { /* ignore */ }
+      }
     }
   }
 
   async webSocketClose(ws: WebSocket) {
+    const p = this.players.get(ws);
+    if (p) {
+      this.usedZones.delete(p.zone);
+    }
     this.players.delete(ws);
-    this.maybeStopTicking();
+    this.maybeStopBroadcasting();
   }
 
   async webSocketError(ws: WebSocket) {
+    const p = this.players.get(ws);
+    if (p) {
+      this.usedZones.delete(p.zone);
+    }
     this.players.delete(ws);
-    this.maybeStopTicking();
+    this.maybeStopBroadcasting();
   }
 
-  private ensureTicking() {
-    if (this.tickHandle !== null) return;
-    this.tickHandle = setInterval(() => this.tick(), this.TICK_MS) as unknown as number;
+  private ensureBroadcasting() {
+    if (this.broadcastHandle !== null) return;
+    this.broadcastHandle = setInterval(() => this.broadcast(), this.BROADCAST_MS) as unknown as number;
   }
 
-  private maybeStopTicking() {
+  private maybeStopBroadcasting() {
     if (this.players.size > 0) return;
-    if (this.tickHandle !== null) {
-      clearInterval(this.tickHandle as unknown as number);
-      this.tickHandle = null;
+    if (this.broadcastHandle !== null) {
+      clearInterval(this.broadcastHandle as unknown as number);
+      this.broadcastHandle = null;
     }
-    this.bullets = [];
   }
 
-  private tick() {
-    const now = Date.now();
-    const dt = this.TICK_MS / 1000;
-
-    // 入力反映（サーバ権威）
+  private broadcast() {
+    const playersObj: Record<string, { x: number; y: number; hp: number; zone: number; bullets: { x: number; y: number }[] }> = {};
     for (const p of this.players.values()) {
-      const input = p.lastInput;
-      if (!input || p.hp <= 0) continue;
-
-      let vx = 0, vy = 0;
-      if (input.left) vx -= 1;
-      if (input.right) vx += 1;
-      if (input.up) vy -= 1;
-      if (input.down) vy += 1;
-      const len = Math.hypot(vx, vy) || 1;
-      vx = (vx / len) * this.SPEED;
-      vy = (vy / len) * this.SPEED;
-
-      p.x = clamp(p.x + vx * dt, 0, this.MAP_W);
-      p.y = clamp(p.y + vy * dt, 0, this.MAP_H);
-
-      // 射撃
-      if (input.shoot && now - p.lastShotAt >= this.SHOT_COOLDOWN_MS) {
-        p.lastShotAt = now;
-        const ax = input.aimX - p.x;
-        const ay = input.aimY - p.y;
-        const al = Math.hypot(ax, ay) || 1;
-        const bvx = (ax / al) * this.BULLET_SPEED;
-        const bvy = (ay / al) * this.BULLET_SPEED;
-        this.bullets.push({ x: p.x, y: p.y, vx: bvx, vy: bvy, owner: p.id });
-      }
+      playersObj[p.id] = { x: p.x, y: p.y, hp: p.hp, zone: p.zone, bullets: p.bullets };
     }
 
-    // 弾の更新
-    for (const b of this.bullets) {
-      b.x += b.vx * dt;
-      b.y += b.vy * dt;
-    }
-    // 画面外弾を除去
-    this.bullets = this.bullets.filter(b => b.x >= -20 && b.x <= this.MAP_W + 20 && b.y >= -20 && b.y <= this.MAP_H + 20);
-
-    // 当たり判定（最小：円ヒット）
-    for (const b of this.bullets) {
-      for (const p of this.players.values()) {
-        if (p.hp <= 0) continue;
-        if (p.id === b.owner) continue;
-        const dx = p.x - b.x;
-        const dy = p.y - b.y;
-        if (dx * dx + dy * dy <= 18 * 18) {
-          p.hp -= 1;
-          // ヒットした弾を遠くへ飛ばして実質無効化（簡易）
-          b.x = 1e9;
-          b.y = 1e9;
-        }
-      }
-    }
-    this.bullets = this.bullets.filter(b => b.x < 1e8);
-
-    // スナップショット配信
-    const playersObj: Record<string, { x: number; y: number; hp: number }> = {};
-    for (const p of this.players.values()) playersObj[p.id] = { x: p.x, y: p.y, hp: p.hp };
-
-    const payload: ServerMsg = {
-      type: "state",
-      t: now,
-      players: playersObj,
-      bullets: this.bullets.map(b => ({ x: b.x, y: b.y })),
-    };
-
+    const payload: ServerMsg = { type: "players", players: playersObj };
     const json = JSON.stringify(payload);
+
     for (const ws of this.players.keys()) {
       try { ws.send(json); } catch { /* ignore */ }
     }
   }
-}
-
-function clamp(v: number, lo: number, hi: number) {
-  return Math.max(lo, Math.min(hi, v));
 }
