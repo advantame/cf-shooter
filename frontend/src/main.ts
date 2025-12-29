@@ -135,6 +135,7 @@ type OtherPlayer = {
   shield: boolean;
 };
 let otherPlayers: Record<string, OtherPlayer> = {};
+let prevOtherPlayersGrenades: Record<string, { x: number; y: number }[]> = {}; // 前フレームのグレネード位置
 
 let connectionStatus = "接続中...";
 
@@ -165,12 +166,38 @@ function connect() {
       myBullets = [];
     }
     if (msg.type === "players") {
-      otherPlayers = {};
+      const now = performance.now();
+      const newOtherPlayers: Record<string, OtherPlayer> = {};
+      const newGrenades: Record<string, { x: number; y: number }[]> = {};
+
       for (const [id, p] of Object.entries<any>(msg.players)) {
         if (id !== myId) {
-          otherPlayers[id] = p;
+          newOtherPlayers[id] = p;
+          // 現在のグレネード位置を保存
+          newGrenades[id] = (p.specialBullets || [])
+            .filter((b: any) => b.type === "grenade")
+            .map((b: any) => ({ x: b.x, y: b.y }));
+
+          // 前フレームにあったグレネードが消えていたら爆発エフェクト追加
+          const prevGrenades = prevOtherPlayersGrenades[id] || [];
+          const currGrenadeCount = newGrenades[id].length;
+          // グレネードが減った場合、最後の位置で爆発
+          if (prevGrenades.length > currGrenadeCount) {
+            for (let i = currGrenadeCount; i < prevGrenades.length; i++) {
+              explosionEffects.push({
+                x: prevGrenades[i].x,
+                y: prevGrenades[i].y,
+                radius: PLAYER_RADIUS * 8,
+                startTime: now,
+                duration: 400,
+              });
+            }
+          }
         }
       }
+
+      otherPlayers = newOtherPlayers;
+      prevOtherPlayersGrenades = newGrenades;
     }
     if (msg.type === "hit" && msg.targetId === myId) {
       // シールド中はダメージ無効
