@@ -124,18 +124,24 @@ let myHp = MAX_HP;
 let myBullets: { x: number; y: number; vx: number; vy: number }[] = [];
 let lastShotAt = 0;
 
-// 他プレイヤーの状態
+// 他プレイヤーの状態（弾情報は削除、各クライアントでローカル処理）
 type OtherPlayer = {
   x: number; y: number;
   hp: number; zone: number;
-  bullets: { x: number; y: number }[];
-  specialBullets: { type: string; x: number; y: number; vx: number; vy: number }[];
-  beams: { angle: number; time: number }[];
-  beamWarnings: { angle: number; fireAt: number }[];
+  aimOffset: number;  // 照準オフセット（通常弾の方向計算用）
   shield: boolean;
 };
 let otherPlayers: Record<string, OtherPlayer> = {};
-let prevOtherPlayersGrenades: Record<string, { x: number; y: number }[]> = {}; // 前フレームのグレネード位置
+
+// 全プレイヤーの通常弾（ローカルで計算）
+let allPlayerBullets: Map<string, { x: number; y: number; vx: number; vy: number }[]> = new Map();
+let lastBulletShotTime: Map<string, number> = new Map();
+
+// 敵の特殊弾（FireMsgで受信）
+let enemySpecialBullets: Map<string, SpecialBullet[]> = new Map();
+let enemyBeamWarnings: Map<string, BeamWarning[]> = new Map();
+let enemyBeamEffects: Map<string, BeamEffect[]> = new Map();
+let processedBulletIds: Set<string> = new Set(); // 重複防止
 
 let connectionStatus = "接続中...";
 
@@ -164,47 +170,131 @@ function connect() {
       myY = CENTER_Y + Math.sin(angle) * dist;
       myHp = MAX_HP;
       myBullets = [];
+      // 弾データをリセット
+      allPlayerBullets.clear();
+      lastBulletShotTime.clear();
+      enemySpecialBullets.clear();
+      enemyBeamWarnings.clear();
+      enemyBeamEffects.clear();
+      processedBulletIds.clear();
     }
     if (msg.type === "players") {
       const now = performance.now();
-      const newOtherPlayers: Record<string, OtherPlayer> = {};
-      const newGrenades: Record<string, { x: number; y: number }[]> = {};
+      const currentIds = new Set<string>();
 
       for (const [id, p] of Object.entries<any>(msg.players)) {
         if (id !== myId) {
-          newOtherPlayers[id] = p;
-          // 現在のグレネード位置を保存
-          newGrenades[id] = (p.specialBullets || [])
-            .filter((b: any) => b.type === "grenade")
-            .map((b: any) => ({ x: b.x, y: b.y }));
-
-          // 前フレームにあったグレネードが消えていたら爆発エフェクト追加
-          const prevGrenades = prevOtherPlayersGrenades[id] || [];
-          const currGrenadeCount = newGrenades[id].length;
-          // グレネードが減った場合、最後の位置で爆発
-          if (prevGrenades.length > currGrenadeCount) {
-            for (let i = currGrenadeCount; i < prevGrenades.length; i++) {
-              explosionEffects.push({
-                x: prevGrenades[i].x,
-                y: prevGrenades[i].y,
-                radius: PLAYER_RADIUS * 8,
-                startTime: now,
-                duration: 400,
-              });
-            }
+          currentIds.add(id);
+          otherPlayers[id] = {
+            x: p.x,
+            y: p.y,
+            hp: p.hp,
+            zone: p.zone,
+            aimOffset: p.aimOffset ?? 0,
+            shield: p.shield ?? false,
+          };
+          // 弾リストを初期化（まだなければ）
+          if (!allPlayerBullets.has(id)) {
+            allPlayerBullets.set(id, []);
+            lastBulletShotTime.set(id, now);
+          }
+          if (!enemySpecialBullets.has(id)) {
+            enemySpecialBullets.set(id, []);
+            enemyBeamWarnings.set(id, []);
+            enemyBeamEffects.set(id, []);
           }
         }
       }
 
-      otherPlayers = newOtherPlayers;
-      prevOtherPlayersGrenades = newGrenades;
-    }
-    if (msg.type === "hit" && msg.targetId === myId) {
-      // シールド中はダメージ無効
-      if (performance.now() < shieldActiveUntil) {
-        return;
+      // 退出したプレイヤーをクリーンアップ
+      for (const id of Object.keys(otherPlayers)) {
+        if (!currentIds.has(id)) {
+          delete otherPlayers[id];
+          allPlayerBullets.delete(id);
+          lastBulletShotTime.delete(id);
+          enemySpecialBullets.delete(id);
+          enemyBeamWarnings.delete(id);
+          enemyBeamEffects.delete(id);
+        }
       }
-      myHp = Math.max(0, myHp - 1);
+    }
+    // 敵の特殊弾発射を受信
+    if (msg.type === "fire") {
+      const { fromId, bulletType, x, y, angle, bulletId, targetId } = msg;
+      // 重複チェック
+      if (processedBulletIds.has(bulletId)) return;
+      processedBulletIds.add(bulletId);
+      // 古いIDをクリーンアップ（1000個を超えたら古いのを削除）
+      if (processedBulletIds.size > 1000) {
+        const arr = Array.from(processedBulletIds);
+        for (let i = 0; i < 500; i++) {
+          processedBulletIds.delete(arr[i]);
+        }
+      }
+
+      const now = performance.now();
+      switch (bulletType) {
+        case "grenade": {
+          const vx = Math.cos(angle) * GRENADE_INITIAL_SPEED;
+          const vy = Math.sin(angle) * GRENADE_INITIAL_SPEED;
+          const bullets = enemySpecialBullets.get(fromId) ?? [];
+          bullets.push({
+            type: "grenade",
+            x, y, vx, vy,
+            initialVx: vx,
+            initialVy: vy,
+            createdAt: now,
+          });
+          enemySpecialBullets.set(fromId, bullets);
+          break;
+        }
+        case "beam": {
+          const warnings = enemyBeamWarnings.get(fromId) ?? [];
+          warnings.push({
+            startX: x,
+            startY: y,
+            angle,
+            createdAt: now,
+            fireAt: now + BEAM_WARNING_DURATION,
+            fired: false,
+          });
+          enemyBeamWarnings.set(fromId, warnings);
+          break;
+        }
+        case "shotgun": {
+          const bullets = enemySpecialBullets.get(fromId) ?? [];
+          bullets.push({
+            type: "shotgun",
+            x, y,
+            vx: Math.cos(angle) * SHOTGUN_PARENT_SPEED,
+            vy: Math.sin(angle) * SHOTGUN_PARENT_SPEED,
+            createdAt: now,
+            lastChildShotAt: now,
+          });
+          enemySpecialBullets.set(fromId, bullets);
+          break;
+        }
+        case "missile": {
+          const bullets = enemySpecialBullets.get(fromId) ?? [];
+          bullets.push({
+            type: "missile",
+            x, y,
+            vx: Math.cos(angle) * MISSILE_SPEED,
+            vy: Math.sin(angle) * MISSILE_SPEED,
+            createdAt: now,
+            targetId: targetId,  // 自分がターゲットの場合は自分を追尾
+          });
+          enemySpecialBullets.set(fromId, bullets);
+          break;
+        }
+      }
+    }
+    // ダメージ通知を受信（他プレイヤーのHP更新）
+    if (msg.type === "damage" && msg.playerId !== myId) {
+      const player = otherPlayers[msg.playerId];
+      if (player) {
+        player.hp = Math.max(0, player.hp - msg.amount);
+      }
     }
   };
 
@@ -590,6 +680,11 @@ function fireWeapon(weapon: Weapon, screenAngle: number) {
 const GRENADE_DURATION = 800; // ms
 const GRENADE_INITIAL_SPEED = SIZE * 1.0;
 
+// FireMsg送信用のユニークID生成
+function generateBulletId(): string {
+  return `${myId}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
 function fireGrenade(angle: number) {
   const vx = Math.cos(angle) * GRENADE_INITIAL_SPEED;
   const vy = Math.sin(angle) * GRENADE_INITIAL_SPEED;
@@ -603,6 +698,17 @@ function fireGrenade(angle: number) {
     initialVy: vy,
     createdAt: performance.now(),
   });
+  // FireMsgを送信
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: "fire",
+      bulletType: "grenade",
+      x: myX,
+      y: myY,
+      angle: angle,
+      bulletId: generateBulletId(),
+    }));
+  }
 }
 
 // ビーム発射（警告追加）
@@ -617,34 +723,26 @@ function fireBeam(angle: number) {
     fireAt: now + BEAM_WARNING_DURATION,
     fired: false,
   });
+  // FireMsgを送信
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: "fire",
+      bulletType: "beam",
+      x: myX,
+      y: myY,
+      angle: angle,
+      bulletId: generateBulletId(),
+    }));
+  }
 }
 
-// ビーム実際の発射処理
+// ビーム実際の発射処理（自分のビーム用、攻撃判定は被弾側で行う）
 function executeBeamFire(warning: BeamWarning) {
-  const startX = warning.startX;
-  const startY = warning.startY;
-  const angle = warning.angle;
-  const endX = startX + Math.cos(angle) * ARENA_RADIUS * 2;
-  const endY = startY + Math.sin(angle) * ARENA_RADIUS * 2;
-
-  // レーザー線上の当たり判定
-  for (const [id, p] of Object.entries(otherPlayers)) {
-    if (p.hp <= 0) continue;
-    if (pointToLineDistance(p.x, p.y, startX, startY, endX, endY) < PLAYER_RADIUS * 1.5) {
-      // 60ダメージ
-      for (let i = 0; i < 60; i++) {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "hit", targetId: id }));
-        }
-      }
-    }
-  }
-
-  // ビームエフェクト追加
+  // ビームエフェクト追加（判定は被弾側で行うためここでは描画のみ）
   beamEffects.push({
-    startX,
-    startY,
-    angle,
+    startX: warning.startX,
+    startY: warning.startY,
+    angle: warning.angle,
     endTime: performance.now() + 300,
   });
 }
@@ -667,6 +765,17 @@ function fireShotgun(centerAngle: number) {
     createdAt: now,
     lastChildShotAt: now, // 最初の子弾発射時刻
   });
+  // FireMsgを送信
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: "fire",
+      bulletType: "shotgun",
+      x: myX,
+      y: myY,
+      angle: centerAngle,
+      bulletId: generateBulletId(),
+    }));
+  }
 }
 
 // ミサイル発射
@@ -697,6 +806,18 @@ function fireMissile(initialAngle: number) {
     createdAt: performance.now(),
     targetId: nearestId ?? undefined,
   });
+  // FireMsgを送信
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: "fire",
+      bulletType: "missile",
+      x: myX,
+      y: myY,
+      angle: initialAngle,
+      bulletId: generateBulletId(),
+      targetId: nearestId ?? undefined,
+    }));
+  }
 }
 
 // シールド発動
@@ -763,29 +884,13 @@ function updateSpecialBullets(dt: number) {
       }
 
       case "shotgun_child": {
-        // 子弾：通常の弾として進み、当たり判定を持つ
+        // 子弾：通常の弾として進む（攻撃判定は被弾側で行う）
         bullet.x += bullet.vx * dt;
         bullet.y += bullet.vy * dt;
 
         // アリーナ外で消滅
         const childDist = Math.hypot(bullet.x - CENTER_X, bullet.y - CENTER_Y);
         if (childDist > ARENA_RADIUS + 50) return false;
-
-        // 当たり判定
-        for (const [id, p] of Object.entries(otherPlayers)) {
-          if (p.hp <= 0) continue;
-          const dx = p.x - bullet.x;
-          const dy = p.y - bullet.y;
-          if (dx * dx + dy * dy <= (PLAYER_RADIUS * 1.2) ** 2) {
-            // 8ダメージ
-            for (let i = 0; i < 8; i++) {
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "hit", targetId: id }));
-              }
-            }
-            return false;
-          }
-        }
         return true;
       }
 
@@ -793,7 +898,7 @@ function updateSpecialBullets(dt: number) {
         // 3秒経過で消滅
         if (now - bullet.createdAt > 3000) return false;
         const missileElapsed = now - bullet.createdAt;
-        // 1秒間のみ追尾、それ以降は直進
+        // 1秒間のみ追尾、それ以降は直進（攻撃判定は被弾側で行う）
         if (missileElapsed < MISSILE_HOMING_DURATION &&
             bullet.targetId && otherPlayers[bullet.targetId] && otherPlayers[bullet.targetId].hp > 0) {
           const target = otherPlayers[bullet.targetId];
@@ -809,29 +914,6 @@ function updateSpecialBullets(dt: number) {
         }
         bullet.x += bullet.vx * dt;
         bullet.y += bullet.vy * dt;
-        // 当たり判定
-        for (const [id, p] of Object.entries(otherPlayers)) {
-          if (p.hp <= 0) continue;
-          const dx = p.x - bullet.x;
-          const dy = p.y - bullet.y;
-          if (dx * dx + dy * dy <= (PLAYER_RADIUS * 1.5) ** 2) {
-            // 35ダメージ
-            for (let i = 0; i < 35; i++) {
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: "hit", targetId: id }));
-              }
-            }
-            // 爆発エフェクト
-            explosionEffects.push({
-              x: bullet.x,
-              y: bullet.y,
-              radius: PLAYER_RADIUS * 2,
-              startTime: now,
-              duration: 300,
-            });
-            return false;
-          }
-        }
         // アリーナ外で消滅
         const missileDist = Math.hypot(bullet.x - CENTER_X, bullet.y - CENTER_Y);
         if (missileDist > ARENA_RADIUS + 50) return false;
@@ -847,26 +929,12 @@ function updateSpecialBullets(dt: number) {
   mySpecialBullets.push(...newChildBullets);
 }
 
-// グレネード爆発
+// グレネード爆発（自分のグレネード用、攻撃判定は被弾側で行う）
 function explodeGrenade(bullet: SpecialBullet) {
-  const explosionRadius = PLAYER_RADIUS * 8; // 広範囲
+  const explosionRadius = PLAYER_RADIUS * 8;
   const now = performance.now();
 
-  // 範囲内の全プレイヤーにダメージ
-  for (const [id, p] of Object.entries(otherPlayers)) {
-    if (p.hp <= 0) continue;
-    const dist = Math.hypot(p.x - bullet.x, p.y - bullet.y);
-    if (dist <= explosionRadius) {
-      // 40ダメージ
-      for (let i = 0; i < 40; i++) {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "hit", targetId: id }));
-        }
-      }
-    }
-  }
-
-  // 爆発エフェクト追加
+  // 爆発エフェクト追加のみ（判定は被弾側で行う）
   explosionEffects.push({
     x: bullet.x,
     y: bullet.y,
@@ -874,6 +942,219 @@ function explodeGrenade(bullet: SpecialBullet) {
     startTime: now,
     duration: 400,
   });
+}
+
+// 敵の特殊弾の更新と被弾判定
+function updateEnemySpecialBullets(dt: number, now: number) {
+  const isShielded = now < shieldActiveUntil;
+
+  for (const [fromId, bullets] of enemySpecialBullets) {
+    const newChildBullets: SpecialBullet[] = [];
+
+    const remainingBullets = bullets.filter(bullet => {
+      switch (bullet.type) {
+        case "grenade": {
+          // 経過時間に応じて速度を減衰
+          const elapsed = now - bullet.createdAt;
+          const ratio = Math.max(0, 1 - elapsed / GRENADE_DURATION);
+
+          bullet.vx = (bullet.initialVx ?? 0) * ratio;
+          bullet.vy = (bullet.initialVy ?? 0) * ratio;
+          bullet.x += bullet.vx * dt;
+          bullet.y += bullet.vy * dt;
+
+          // 速度が0になったら爆発
+          if (ratio <= 0) {
+            const explosionRadius = PLAYER_RADIUS * 8;
+            // 爆発エフェクト追加
+            explosionEffects.push({
+              x: bullet.x,
+              y: bullet.y,
+              radius: explosionRadius,
+              startTime: now,
+              duration: 400,
+            });
+            // 自機への被弾判定
+            if (myId && myHp > 0 && !isShielded) {
+              const dist = Math.hypot(myX - bullet.x, myY - bullet.y);
+              if (dist <= explosionRadius) {
+                myHp = Math.max(0, myHp - 40);
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ type: "damage", amount: 40 }));
+                }
+              }
+            }
+            return false;
+          }
+          return true;
+        }
+
+        case "shotgun": {
+          // 親弾：遅い速度で進み、一定間隔で垂直方向に子弾を発射
+          bullet.x += bullet.vx * dt;
+          bullet.y += bullet.vy * dt;
+
+          // 持続時間チェック
+          if (now - bullet.createdAt > SHOTGUN_DURATION) return false;
+
+          // アリーナ外で消滅
+          const shotgunDist = Math.hypot(bullet.x - CENTER_X, bullet.y - CENTER_Y);
+          if (shotgunDist > ARENA_RADIUS + 50) return false;
+
+          // 一定間隔で子弾を発射
+          if (now - (bullet.lastChildShotAt ?? bullet.createdAt) >= SHOTGUN_CHILD_INTERVAL) {
+            bullet.lastChildShotAt = now;
+            const parentAngle = Math.atan2(bullet.vy, bullet.vx);
+            const perpAngles = [parentAngle + Math.PI / 2, parentAngle - Math.PI / 2];
+            for (const angle of perpAngles) {
+              newChildBullets.push({
+                type: "shotgun_child",
+                x: bullet.x,
+                y: bullet.y,
+                vx: Math.cos(angle) * SHOTGUN_CHILD_SPEED,
+                vy: Math.sin(angle) * SHOTGUN_CHILD_SPEED,
+                createdAt: now,
+              });
+            }
+          }
+          return true;
+        }
+
+        case "shotgun_child": {
+          // 子弾：進んで自機への被弾判定
+          bullet.x += bullet.vx * dt;
+          bullet.y += bullet.vy * dt;
+
+          // アリーナ外で消滅
+          const childDist = Math.hypot(bullet.x - CENTER_X, bullet.y - CENTER_Y);
+          if (childDist > ARENA_RADIUS + 50) return false;
+
+          // 自機への被弾判定
+          if (myId && myHp > 0 && !isShielded) {
+            const dx = myX - bullet.x;
+            const dy = myY - bullet.y;
+            if (dx * dx + dy * dy <= (PLAYER_RADIUS * 1.2) ** 2) {
+              myHp = Math.max(0, myHp - 8);
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "damage", amount: 8 }));
+              }
+              return false;
+            }
+          }
+          return true;
+        }
+
+        case "missile": {
+          // 3秒経過で消滅
+          if (now - bullet.createdAt > 3000) return false;
+          const missileElapsed = now - bullet.createdAt;
+
+          // 1秒間のみ追尾（ターゲットが自分なら自分を追尾）
+          if (missileElapsed < MISSILE_HOMING_DURATION) {
+            let targetX: number | undefined;
+            let targetY: number | undefined;
+
+            if (bullet.targetId === myId && myHp > 0) {
+              // 自分がターゲット
+              targetX = myX;
+              targetY = myY;
+            } else if (bullet.targetId && otherPlayers[bullet.targetId] && otherPlayers[bullet.targetId].hp > 0) {
+              // 他プレイヤーがターゲット
+              const target = otherPlayers[bullet.targetId];
+              targetX = target.x;
+              targetY = target.y;
+            }
+
+            if (targetX !== undefined && targetY !== undefined) {
+              const toTarget = Math.atan2(targetY - bullet.y, targetX - bullet.x);
+              const currentAngle = Math.atan2(bullet.vy, bullet.vx);
+              let angleDiff = normalizeAngle(toTarget - currentAngle);
+              const turnRate = 3.0 * dt;
+              angleDiff = Math.max(-turnRate, Math.min(turnRate, angleDiff));
+              const newAngle = currentAngle + angleDiff;
+              const speed = Math.hypot(bullet.vx, bullet.vy);
+              bullet.vx = Math.cos(newAngle) * speed;
+              bullet.vy = Math.sin(newAngle) * speed;
+            }
+          }
+
+          bullet.x += bullet.vx * dt;
+          bullet.y += bullet.vy * dt;
+
+          // 自機への被弾判定
+          if (myId && myHp > 0 && !isShielded) {
+            const dx = myX - bullet.x;
+            const dy = myY - bullet.y;
+            if (dx * dx + dy * dy <= (PLAYER_RADIUS * 1.5) ** 2) {
+              myHp = Math.max(0, myHp - 35);
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "damage", amount: 35 }));
+              }
+              // 爆発エフェクト
+              explosionEffects.push({
+                x: bullet.x,
+                y: bullet.y,
+                radius: PLAYER_RADIUS * 2,
+                startTime: now,
+                duration: 300,
+              });
+              return false;
+            }
+          }
+
+          // アリーナ外で消滅
+          const missileDist = Math.hypot(bullet.x - CENTER_X, bullet.y - CENTER_Y);
+          if (missileDist > ARENA_RADIUS + 50) return false;
+          return true;
+        }
+
+        default:
+          return false;
+      }
+    });
+
+    // 子弾を追加
+    remainingBullets.push(...newChildBullets);
+    enemySpecialBullets.set(fromId, remainingBullets);
+  }
+}
+
+// 敵のビーム警告の更新と被弾判定
+function updateEnemyBeamWarnings(now: number) {
+  const isShielded = now < shieldActiveUntil;
+
+  for (const [fromId, warnings] of enemyBeamWarnings) {
+    for (const warning of warnings) {
+      if (!warning.fired && now >= warning.fireAt) {
+        warning.fired = true;
+
+        // ビームエフェクト追加
+        const effects = enemyBeamEffects.get(fromId) ?? [];
+        effects.push({
+          startX: warning.startX,
+          startY: warning.startY,
+          angle: warning.angle,
+          endTime: now + 300,
+        });
+        enemyBeamEffects.set(fromId, effects);
+
+        // 自機への被弾判定
+        if (myId && myHp > 0 && !isShielded) {
+          const endX = warning.startX + Math.cos(warning.angle) * ARENA_RADIUS * 2;
+          const endY = warning.startY + Math.sin(warning.angle) * ARENA_RADIUS * 2;
+          if (pointToLineDistance(myX, myY, warning.startX, warning.startY, endX, endY) < PLAYER_RADIUS * 1.5) {
+            myHp = Math.max(0, myHp - 60);
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "damage", amount: 60 }));
+            }
+          }
+        }
+      }
+    }
+
+    // 発射済みの警告を削除
+    enemyBeamWarnings.set(fromId, warnings.filter(w => !w.fired));
+  }
 }
 
 // ゲームループ
@@ -925,7 +1206,7 @@ function gameLoop() {
     }
   }
 
-  // 弾の更新
+  // 自分の弾の更新
   for (const b of myBullets) {
     b.x += b.vx * dt;
     b.y += b.vy * dt;
@@ -938,28 +1219,76 @@ function gameLoop() {
     return Math.hypot(dx, dy) <= ARENA_RADIUS + 50;
   });
 
-  // 当たり判定（自分の弾 vs 他プレイヤー）
-  for (const b of myBullets) {
-    for (const [id, p] of Object.entries(otherPlayers)) {
-      if (p.hp <= 0) continue;
-      const dx = p.x - b.x;
-      const dy = p.y - b.y;
-      const hitRadius = PLAYER_RADIUS * 1.2;
-      if (dx * dx + dy * dy <= hitRadius * hitRadius) {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "hit", targetId: id }));
-        }
-        b.x = 1e9;
-        b.y = 1e9;
+  // 他プレイヤーの通常弾をローカルで生成・更新
+  for (const [id, p] of Object.entries(otherPlayers)) {
+    if (p.hp <= 0) continue;
+
+    let bullets = allPlayerBullets.get(id) ?? [];
+    let lastShot = lastBulletShotTime.get(id) ?? now;
+
+    // 一定間隔で弾を生成
+    if (now - lastShot >= SHOT_COOLDOWN_MS) {
+      lastBulletShotTime.set(id, now);
+
+      // 敵のzoneの中心から中心へ向かう方向 + 照準オフセット
+      const shootAngle = getZoneCenterAngle(p.zone) + Math.PI + p.aimOffset;
+
+      // 二股発射
+      for (const offset of [-FORK_ANGLE, FORK_ANGLE]) {
+        const angle = shootAngle + offset;
+        const bvx = Math.cos(angle) * BULLET_SPEED;
+        const bvy = Math.sin(angle) * BULLET_SPEED;
+        bullets.push({ x: p.x, y: p.y, vx: bvx, vy: bvy });
       }
     }
-  }
-  myBullets = myBullets.filter(b => b.x < 1e8);
 
-  // 特殊弾の更新
+    // 弾の位置を更新
+    for (const b of bullets) {
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    }
+
+    // 画面外の弾を除去
+    bullets = bullets.filter(b => {
+      const dx = b.x - CENTER_X;
+      const dy = b.y - CENTER_Y;
+      return Math.hypot(dx, dy) <= ARENA_RADIUS + 50;
+    });
+
+    allPlayerBullets.set(id, bullets);
+  }
+
+  // 敵の通常弾 vs 自機の被弾判定
+  if (myId && myHp > 0 && now >= shieldActiveUntil) {
+    for (const [id, bullets] of allPlayerBullets) {
+      for (const b of bullets) {
+        const dx = myX - b.x;
+        const dy = myY - b.y;
+        const hitRadius = PLAYER_RADIUS * 1.2;
+        if (dx * dx + dy * dy <= hitRadius * hitRadius) {
+          // 被弾！ダメージを受ける
+          myHp = Math.max(0, myHp - 1);
+          // ダメージ通知を送信
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "damage", amount: 1 }));
+          }
+          // 弾を削除
+          b.x = 1e9;
+          b.y = 1e9;
+        }
+      }
+      // 当たった弾を削除
+      allPlayerBullets.set(id, bullets.filter(b => b.x < 1e8));
+    }
+  }
+
+  // 特殊弾の更新（自分の特殊弾）
   updateSpecialBullets(dt);
 
-  // ビーム警告の更新（発射時刻に達したら発射）
+  // 敵の特殊弾の更新と被弾判定
+  updateEnemySpecialBullets(dt, now);
+
+  // ビーム警告の更新（発射時刻に達したら発射）- 自分のビーム
   for (const warning of beamWarnings) {
     if (!warning.fired && now >= warning.fireAt) {
       executeBeamFire(warning);
@@ -969,11 +1298,18 @@ function gameLoop() {
   // 発射済みの警告を削除
   beamWarnings = beamWarnings.filter(w => !w.fired);
 
+  // 敵のビーム警告の更新と被弾判定
+  updateEnemyBeamWarnings(now);
+
   // エフェクトの更新
   beamEffects = beamEffects.filter(e => now < e.endTime);
   explosionEffects = explosionEffects.filter(e => now < e.startTime + e.duration);
+  // 敵のビームエフェクトの更新
+  for (const [id, effects] of enemyBeamEffects) {
+    enemyBeamEffects.set(id, effects.filter(e => now < e.endTime));
+  }
 
-  // 自分の状態をサーバーに送信
+  // 自分の状態をサーバーに送信（弾情報は削除、aimOffsetを追加）
   if (ws.readyState === WebSocket.OPEN && myId) {
     ws.send(JSON.stringify({
       type: "state",
@@ -982,12 +1318,7 @@ function gameLoop() {
       y: myY,
       hp: myHp,
       zone: myZone,
-      bullets: myBullets,
-      specialBullets: mySpecialBullets.map(b => ({
-        type: b.type, x: b.x, y: b.y, vx: b.vx, vy: b.vy
-      })),
-      beams: beamEffects.map(b => ({ angle: b.angle, time: b.endTime })),
-      beamWarnings: beamWarnings.map(w => ({ angle: w.angle, fireAt: w.fireAt })),
+      aimOffset: aimOffset,
       shield: now < shieldActiveUntil,
     }));
   }
@@ -1038,23 +1369,29 @@ function draw() {
     ctx.stroke();
   }
 
-  // 他プレイヤーの弾（補間された位置で描画）
-  for (const p of Object.values(otherPlayers)) {
-    ctx.fillStyle = PLAYER_COLORS[p.zone] || "#ff6600";
-    for (const b of p.bullets) {
+  // 他プレイヤーの通常弾（ローカルで計算した弾を描画）
+  for (const [id, bullets] of allPlayerBullets) {
+    const player = otherPlayers[id];
+    if (!player) continue;
+    ctx.fillStyle = PLAYER_COLORS[player.zone] || "#ff6600";
+    for (const b of bullets) {
       ctx.beginPath();
       ctx.arc(b.x, b.y, SIZE * 0.012, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 
-  // 他プレイヤーの特殊弾
-  for (const p of Object.values(otherPlayers)) {
-    for (const b of p.specialBullets) {
-      const weapon = WEAPONS.find(w => w.id === b.type);
+  // 他プレイヤーの特殊弾（ローカルで計算した弾を描画）
+  for (const [, bullets] of enemySpecialBullets) {
+    for (const b of bullets) {
+      const weapon = WEAPONS.find(w => w.id === b.type || (b.type === "shotgun_child" && w.id === "shotgun"));
       if (!weapon) continue;
       ctx.fillStyle = weapon.color;
-      const bulletSize = b.type === "grenade" ? SIZE * 0.025 : b.type === "missile" ? SIZE * 0.02 : SIZE * 0.015;
+      const bulletSize = b.type === "grenade" ? SIZE * 0.025 :
+                         b.type === "missile" ? SIZE * 0.02 :
+                         b.type === "shotgun" ? SIZE * 0.02 :
+                         b.type === "shotgun_child" ? SIZE * 0.012 :
+                         SIZE * 0.015;
       ctx.beginPath();
       ctx.arc(b.x, b.y, bulletSize, 0, Math.PI * 2);
       ctx.fill();
@@ -1075,8 +1412,8 @@ function draw() {
   }
 
   // 他プレイヤーのビーム警告（赤い点線、点滅）
-  for (const p of Object.values(otherPlayers)) {
-    for (const warning of p.beamWarnings || []) {
+  for (const [, warnings] of enemyBeamWarnings) {
+    for (const warning of warnings) {
       // 点滅エフェクト（高速で点滅）
       const blinkPhase = Math.sin(now / 50) * 0.5 + 0.5;
       const alpha = 0.3 + blinkPhase * 0.5;
@@ -1084,10 +1421,10 @@ function draw() {
       ctx.lineWidth = SIZE * 0.01;
       ctx.setLineDash([SIZE * 0.02, SIZE * 0.015]);
       ctx.beginPath();
-      ctx.moveTo(p.x, p.y);
+      ctx.moveTo(warning.startX, warning.startY);
       ctx.lineTo(
-        p.x + Math.cos(warning.angle) * ARENA_RADIUS * 2,
-        p.y + Math.sin(warning.angle) * ARENA_RADIUS * 2
+        warning.startX + Math.cos(warning.angle) * ARENA_RADIUS * 2,
+        warning.startY + Math.sin(warning.angle) * ARENA_RADIUS * 2
       );
       ctx.stroke();
       ctx.setLineDash([]);
@@ -1095,26 +1432,27 @@ function draw() {
   }
 
   // 他プレイヤーのビームエフェクト（太さ6倍）
-  for (const p of Object.values(otherPlayers)) {
-    for (const beam of p.beams) {
-      const alpha = Math.min(1, (beam.time - now) / 300);
+  for (const [, effects] of enemyBeamEffects) {
+    for (const beam of effects) {
+      const alpha = Math.min(1, (beam.endTime - now) / 300);
       if (alpha <= 0) continue;
       ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`;
       ctx.lineWidth = SIZE * 0.12; // 6倍
       ctx.beginPath();
-      ctx.moveTo(p.x, p.y);
+      ctx.moveTo(beam.startX, beam.startY);
       ctx.lineTo(
-        p.x + Math.cos(beam.angle) * ARENA_RADIUS * 2,
-        p.y + Math.sin(beam.angle) * ARENA_RADIUS * 2
+        beam.startX + Math.cos(beam.angle) * ARENA_RADIUS * 2,
+        beam.startY + Math.sin(beam.angle) * ARENA_RADIUS * 2
       );
       ctx.stroke();
+      // 中心の白い線
       ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
-      ctx.lineWidth = SIZE * 0.03; // 6倍
+      ctx.lineWidth = SIZE * 0.03;
       ctx.beginPath();
-      ctx.moveTo(p.x, p.y);
+      ctx.moveTo(beam.startX, beam.startY);
       ctx.lineTo(
-        p.x + Math.cos(beam.angle) * ARENA_RADIUS * 2,
-        p.y + Math.sin(beam.angle) * ARENA_RADIUS * 2
+        beam.startX + Math.cos(beam.angle) * ARENA_RADIUS * 2,
+        beam.startY + Math.sin(beam.angle) * ARENA_RADIUS * 2
       );
       ctx.stroke();
     }

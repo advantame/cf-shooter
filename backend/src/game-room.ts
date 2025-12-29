@@ -11,19 +11,35 @@ type ClientMsg =
       y: number;
       hp: number;
       zone: number;
-      bullets: { x: number; y: number; vx: number; vy: number }[];
-      specialBullets?: { type: string; x: number; y: number; vx: number; vy: number }[];
-      beams?: { angle: number; time: number }[];
-      beamWarnings?: { angle: number; fireAt: number }[];
+      aimOffset: number;  // 照準オフセット（通常弾の方向計算用）
       shield?: boolean;
     }
-  | { type: "hit"; targetId: string };
+  | {
+      type: "fire";
+      bulletType: "grenade" | "beam" | "shotgun" | "missile";
+      x: number;
+      y: number;
+      angle: number;
+      bulletId: string;
+      targetId?: string;  // ミサイルのターゲット
+    }
+  | { type: "damage"; amount: number };
 
 // サーバーから送信するメッセージ
 type ServerMsg =
   | { type: "hello"; playerId: string; zone: number }
   | { type: "players"; players: Record<string, PlayerState> }
-  | { type: "hit"; targetId: string; fromId: string }
+  | {
+      type: "fire";
+      fromId: string;
+      bulletType: "grenade" | "beam" | "shotgun" | "missile";
+      x: number;
+      y: number;
+      angle: number;
+      bulletId: string;
+      targetId?: string;
+    }
+  | { type: "damage"; playerId: string; amount: number }
   | { type: "error"; message: string };
 
 type PlayerState = {
@@ -32,10 +48,7 @@ type PlayerState = {
   x: number;
   y: number;
   hp: number;
-  bullets: { x: number; y: number }[];
-  specialBullets: { type: string; x: number; y: number; vx: number; vy: number }[];
-  beams: { angle: number; time: number }[];
-  beamWarnings: { angle: number; fireAt: number }[];
+  aimOffset: number;
   shield: boolean;
 };
 
@@ -81,11 +94,8 @@ export class GameRoom implements DurableObject {
       zone,
       x: 0,
       y: 0,
-      hp: 20,
-      bullets: [],
-      specialBullets: [],
-      beams: [],
-      beamWarnings: [],
+      hp: 300,
+      aimOffset: 0,
       shield: false,
     };
     this.players.set(server, initialState);
@@ -114,15 +124,29 @@ export class GameRoom implements DurableObject {
       p.x = msg.x;
       p.y = msg.y;
       p.hp = msg.hp;
-      p.bullets = msg.bullets.map(b => ({ x: b.x, y: b.y }));
-      p.specialBullets = msg.specialBullets ?? [];
-      p.beams = msg.beams ?? [];
-      p.beamWarnings = msg.beamWarnings ?? [];
+      p.aimOffset = msg.aimOffset;
       p.shield = msg.shield ?? false;
-    } else if (msg.type === "hit") {
-      const hitMsg: ServerMsg = { type: "hit", targetId: msg.targetId, fromId: p.id };
+    } else if (msg.type === "fire") {
+      // 特殊弾の発射情報を全プレイヤーに中継
+      const fireMsg: ServerMsg = {
+        type: "fire",
+        fromId: p.id,
+        bulletType: msg.bulletType,
+        x: msg.x,
+        y: msg.y,
+        angle: msg.angle,
+        bulletId: msg.bulletId,
+        targetId: msg.targetId,
+      };
       for (const ws2 of this.players.keys()) {
-        try { ws2.send(JSON.stringify(hitMsg)); } catch { /* ignore */ }
+        if (ws2 === ws) continue; // 送信者には送らない
+        try { ws2.send(JSON.stringify(fireMsg)); } catch { /* ignore */ }
+      }
+    } else if (msg.type === "damage") {
+      // ダメージ情報を全プレイヤーに中継
+      const damageMsg: ServerMsg = { type: "damage", playerId: p.id, amount: msg.amount };
+      for (const ws2 of this.players.keys()) {
+        try { ws2.send(JSON.stringify(damageMsg)); } catch { /* ignore */ }
       }
     }
   }
@@ -167,10 +191,7 @@ export class GameRoom implements DurableObject {
         y: p.y,
         hp: p.hp,
         zone: p.zone,
-        bullets: p.bullets,
-        specialBullets: p.specialBullets,
-        beams: p.beams,
-        beamWarnings: p.beamWarnings,
+        aimOffset: p.aimOffset,
         shield: p.shield,
       };
     }
