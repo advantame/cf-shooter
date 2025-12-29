@@ -546,7 +546,7 @@ function fireWeapon(weapon: Weapon, screenAngle: number) {
 
 // グレネード発射
 function fireGrenade(angle: number) {
-  const speed = SIZE * 1.0;
+  const speed = SIZE * 0.5; // 飛距離短め
   mySpecialBullets.push({
     type: "grenade",
     x: myX,
@@ -733,7 +733,7 @@ function updateSpecialBullets(dt: number) {
 
 // グレネード爆発
 function explodeGrenade(bullet: SpecialBullet) {
-  const explosionRadius = PLAYER_RADIUS * 4;
+  const explosionRadius = PLAYER_RADIUS * 8; // 広範囲
   const now = performance.now();
 
   // 範囲内の全プレイヤーにダメージ
