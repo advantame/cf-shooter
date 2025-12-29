@@ -38,10 +38,19 @@ export function clampToZone(x: number, y: number, zone: number): { x: number; y:
   let dx = x - CENTER_X;
   let dy = y - CENTER_Y;
   let dist = Math.hypot(dx, dy);
-  let angle = Math.atan2(dy, dx);
 
-  const minDist = PLAYER_RADIUS * 2;
+  const minDist = PLAYER_RADIUS * 3;
   const maxDist = ARENA_RADIUS - PLAYER_RADIUS;
+
+  // 中心付近では角度計算が不安定なので、ゾーン中心角度を使用
+  const zoneCenter = getZoneCenterAngle(zone);
+  let angle: number;
+  if (dist < minDist) {
+    angle = zoneCenter;
+  } else {
+    angle = Math.atan2(dy, dx);
+  }
+
   dist = Math.max(minDist, Math.min(maxDist, dist));
 
   const { start, end } = getZoneAngles(zone);
@@ -49,23 +58,15 @@ export function clampToZone(x: number, y: number, zone: number): { x: number; y:
   const clampedStart = start + margin;
   const clampedEnd = end - margin;
 
-  const normAngle = normalizeAngle(angle);
-  const normStart = normalizeAngle(clampedStart);
-  const normEnd = normalizeAngle(clampedEnd);
+  // 角度がゾーン内にあるかチェック（シンプルな方法）
+  let clampedAngle = angle;
+  const angleFromCenter = normalizeAngle(angle - zoneCenter);
+  const halfAngle = Math.PI / state.playerCount - margin;
 
-  let clampedAngle = normAngle;
-  if (normStart < normEnd) {
-    clampedAngle = Math.max(normStart, Math.min(normEnd, normAngle));
-  } else {
-    if (normAngle < normEnd) {
-      clampedAngle = normAngle;
-    } else if (normAngle > normStart) {
-      clampedAngle = normAngle;
-    } else {
-      const distToStart = Math.abs(normalizeAngle(normAngle - normStart));
-      const distToEnd = Math.abs(normalizeAngle(normAngle - normEnd));
-      clampedAngle = distToStart < distToEnd ? normStart : normEnd;
-    }
+  if (angleFromCenter < -halfAngle) {
+    clampedAngle = clampedStart;
+  } else if (angleFromCenter > halfAngle) {
+    clampedAngle = clampedEnd;
   }
 
   return {
