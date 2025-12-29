@@ -1,8 +1,10 @@
 const canvas = document.createElement("canvas");
-// スマホ向け：正方形キャンバス
+// スマホ向け：正方形キャンバス + 武器エリア
 const SIZE = Math.min(window.innerWidth, window.innerHeight);
+const WEAPON_AREA_HEIGHT = SIZE * 0.15;
+const GAME_AREA_HEIGHT = SIZE;
 canvas.width = SIZE;
-canvas.height = SIZE;
+canvas.height = SIZE + WEAPON_AREA_HEIGHT;
 document.body.style.margin = "0";
 document.body.style.background = "#000";
 document.body.style.display = "flex";
@@ -28,6 +30,68 @@ const MAX_HP = 200; // (10倍)
 // 領域の色
 const ZONE_COLORS = ["rgba(0, 229, 255, 0.15)", "rgba(255, 90, 90, 0.15)", "rgba(90, 255, 90, 0.15)"];
 const PLAYER_COLORS = ["#00e5ff", "#ff5a5a", "#5aff5a"];
+
+// 武器システム
+type WeaponId = "grenade" | "beam" | "shotgun" | "missile" | "shield";
+type WeaponMark = "hexagon" | "diamond" | "triangle" | "star" | "circle";
+
+type Weapon = {
+  id: WeaponId;
+  name: string;
+  mark: WeaponMark;
+  damage: number;
+  cooldown: number;
+  color: string;
+  lastUsedAt: number;
+};
+
+const WEAPONS: Weapon[] = [
+  { id: "grenade", name: "グレネード", mark: "hexagon", damage: 40, cooldown: 5000, color: "#ff6600", lastUsedAt: -Infinity },
+  { id: "beam", name: "ビーム", mark: "diamond", damage: 60, cooldown: 8000, color: "#00ffff", lastUsedAt: -Infinity },
+  { id: "shotgun", name: "ショットガン", mark: "triangle", damage: 8, cooldown: 3000, color: "#ffff00", lastUsedAt: -Infinity },
+  { id: "missile", name: "ミサイル", mark: "star", damage: 35, cooldown: 6000, color: "#ff00ff", lastUsedAt: -Infinity },
+  { id: "shield", name: "シールド", mark: "circle", damage: 0, cooldown: 10000, color: "#00ff00", lastUsedAt: -Infinity },
+];
+
+// 武器ボタンのサイズ計算
+const BUTTON_COUNT = 5;
+const BUTTON_GAP = SIZE * 0.02;
+const BUTTON_SIZE = (SIZE - BUTTON_GAP * (BUTTON_COUNT + 1)) / BUTTON_COUNT;
+const BUTTON_Y = GAME_AREA_HEIGHT + (WEAPON_AREA_HEIGHT - BUTTON_SIZE) / 2;
+
+// 特殊弾の型
+type SpecialBullet = {
+  type: WeaponId;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  createdAt: number;
+  targetId?: string;
+  explosionTime?: number;
+};
+
+let mySpecialBullets: SpecialBullet[] = [];
+let shieldActiveUntil = 0;
+
+// ビームエフェクト
+type BeamEffect = {
+  startX: number;
+  startY: number;
+  angle: number;
+  endTime: number;
+};
+let beamEffects: BeamEffect[] = [];
+
+// 爆発エフェクト
+type ExplosionEffect = {
+  x: number;
+  y: number;
+  radius: number;
+  startTime: number;
+  duration: number;
+};
+let explosionEffects: ExplosionEffect[] = [];
 
 // バックエンドURL
 const BACKEND_BASE = (import.meta as any).env?.VITE_BACKEND_BASE ?? "";
@@ -96,6 +160,10 @@ function connect() {
       }
     }
     if (msg.type === "hit" && msg.targetId === myId) {
+      // シールド中はダメージ無効
+      if (performance.now() < shieldActiveUntil) {
+        return;
+      }
       myHp = Math.max(0, myHp - 1);
     }
   };
@@ -201,6 +269,38 @@ let aimTouchId: number | null = null; // 照準用タッチのID
 let aimOffset = 0; // 照準のオフセット角度
 const AIM_SENSITIVITY = 0.003; // 照準感度
 
+// 武器スワイプ用
+let weaponTouchId: number | null = null;
+let weaponTouchStartX = 0;
+let weaponTouchStartY = 0;
+let weaponTouchCurrentX = 0;
+let weaponTouchCurrentY = 0;
+let activeWeaponIndex: number | null = null;
+
+// タッチ領域の判定
+function getTouchZone(y: number): "aim" | "move" | "weapon" {
+  if (y > GAME_AREA_HEIGHT) return "weapon";
+  if (y > GAME_AREA_HEIGHT / 2) return "move";
+  return "aim";
+}
+
+// どの武器ボタンがタッチされたか
+function getWeaponIndexAtPos(x: number, y: number): number | null {
+  if (y < GAME_AREA_HEIGHT || y > GAME_AREA_HEIGHT + WEAPON_AREA_HEIGHT) return null;
+  for (let i = 0; i < BUTTON_COUNT; i++) {
+    const bx = BUTTON_GAP + i * (BUTTON_SIZE + BUTTON_GAP);
+    if (x >= bx && x <= bx + BUTTON_SIZE) {
+      return i;
+    }
+  }
+  return null;
+}
+
+// 武器が使用可能か
+function isWeaponReady(weapon: Weapon): boolean {
+  return performance.now() - weapon.lastUsedAt >= weapon.cooldown;
+}
+
 function getTouchPos(touch: Touch, r: DOMRect): { x: number; y: number } {
   return {
     x: (touch.clientX - r.left) * (canvas.width / r.width),
@@ -216,8 +316,20 @@ canvas.addEventListener("touchstart", (e) => {
   for (let i = 0; i < e.changedTouches.length; i++) {
     const touch = e.changedTouches[i];
     const pos = getTouchPos(touch, r);
+    const zone = getTouchZone(pos.y);
 
-    if (pos.y > SIZE / 2 && moveTouchId === null) {
+    if (zone === "weapon" && weaponTouchId === null) {
+      // 武器エリア
+      const weaponIndex = getWeaponIndexAtPos(pos.x, pos.y);
+      if (weaponIndex !== null && isWeaponReady(WEAPONS[weaponIndex])) {
+        weaponTouchId = touch.identifier;
+        weaponTouchStartX = pos.x;
+        weaponTouchStartY = pos.y;
+        weaponTouchCurrentX = pos.x;
+        weaponTouchCurrentY = pos.y;
+        activeWeaponIndex = weaponIndex;
+      }
+    } else if (zone === "move" && moveTouchId === null) {
       // 下半分：移動（まだ移動タッチがない場合）
       moveTouchId = touch.identifier;
       moveStartX = pos.x;
@@ -225,7 +337,7 @@ canvas.addEventListener("touchstart", (e) => {
       moveCurrentX = pos.x;
       moveCurrentY = pos.y;
       isMoving = true;
-    } else if (pos.y <= SIZE / 2 && aimTouchId === null) {
+    } else if (zone === "aim" && aimTouchId === null) {
       // 上半分：照準（まだ照準タッチがない場合）
       aimTouchId = touch.identifier;
       aimStartX = pos.x;
@@ -242,6 +354,12 @@ canvas.addEventListener("touchmove", (e) => {
   for (let i = 0; i < e.changedTouches.length; i++) {
     const touch = e.changedTouches[i];
     const pos = getTouchPos(touch, r);
+
+    if (touch.identifier === weaponTouchId) {
+      // 武器スワイプの更新
+      weaponTouchCurrentX = pos.x;
+      weaponTouchCurrentY = pos.y;
+    }
 
     if (touch.identifier === moveTouchId) {
       // 移動タッチの更新
@@ -265,6 +383,28 @@ canvas.addEventListener("touchend", (e) => {
   for (let i = 0; i < e.changedTouches.length; i++) {
     const touch = e.changedTouches[i];
 
+    if (touch.identifier === weaponTouchId) {
+      // 武器発射
+      const dx = weaponTouchCurrentX - weaponTouchStartX;
+      const dy = weaponTouchCurrentY - weaponTouchStartY;
+      const swipeDist = Math.hypot(dx, dy);
+
+      if (activeWeaponIndex !== null) {
+        const weapon = WEAPONS[activeWeaponIndex];
+        if (weapon.id === "shield") {
+          // シールドはスワイプ不要
+          fireWeapon(weapon, 0);
+        } else if (swipeDist > 30) {
+          // 十分なスワイプ距離がある場合のみ発射
+          const screenAngle = Math.atan2(dy, dx);
+          fireWeapon(weapon, screenAngle);
+        }
+      }
+
+      weaponTouchId = null;
+      activeWeaponIndex = null;
+    }
+
     if (touch.identifier === moveTouchId) {
       moveTouchId = null;
       isMoving = false;
@@ -282,6 +422,11 @@ canvas.addEventListener("touchcancel", (e) => {
 
   for (let i = 0; i < e.changedTouches.length; i++) {
     const touch = e.changedTouches[i];
+
+    if (touch.identifier === weaponTouchId) {
+      weaponTouchId = null;
+      activeWeaponIndex = null;
+    }
 
     if (touch.identifier === moveTouchId) {
       moveTouchId = null;
@@ -353,6 +498,266 @@ function transformSwipeToWorld(dx: number, dy: number): { dx: number; dy: number
     dx: dx * cos - dy * sin,
     dy: dx * sin + dy * cos,
   };
+}
+
+// 画面角度をワールド角度に変換
+function transformAngleToWorld(screenAngle: number): number {
+  return screenAngle - getViewRotation();
+}
+
+// 点と線分の距離
+function pointToLineDistance(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const A = px - x1;
+  const B = py - y1;
+  const C = x2 - x1;
+  const D = y2 - y1;
+  const dot = A * C + B * D;
+  const lenSq = C * C + D * D;
+  let t = lenSq !== 0 ? dot / lenSq : -1;
+  t = Math.max(0, Math.min(1, t));
+  const nearestX = x1 + t * C;
+  const nearestY = y1 + t * D;
+  return Math.hypot(px - nearestX, py - nearestY);
+}
+
+// 武器発射
+function fireWeapon(weapon: Weapon, screenAngle: number) {
+  weapon.lastUsedAt = performance.now();
+  const worldAngle = transformAngleToWorld(screenAngle);
+
+  switch (weapon.id) {
+    case "grenade":
+      fireGrenade(worldAngle);
+      break;
+    case "beam":
+      fireBeam(worldAngle);
+      break;
+    case "shotgun":
+      fireShotgun(worldAngle);
+      break;
+    case "missile":
+      fireMissile(worldAngle);
+      break;
+    case "shield":
+      activateShield();
+      break;
+  }
+}
+
+// グレネード発射
+function fireGrenade(angle: number) {
+  const speed = SIZE * 1.0;
+  mySpecialBullets.push({
+    type: "grenade",
+    x: myX,
+    y: myY,
+    vx: Math.cos(angle) * speed,
+    vy: Math.sin(angle) * speed,
+    createdAt: performance.now(),
+    explosionTime: performance.now() + 800,
+  });
+}
+
+// ビーム発射
+function fireBeam(angle: number) {
+  const startX = myX;
+  const startY = myY;
+  const endX = startX + Math.cos(angle) * ARENA_RADIUS * 2;
+  const endY = startY + Math.sin(angle) * ARENA_RADIUS * 2;
+
+  // レーザー線上の当たり判定
+  for (const [id, p] of Object.entries(otherPlayers)) {
+    if (p.hp <= 0) continue;
+    if (pointToLineDistance(p.x, p.y, startX, startY, endX, endY) < PLAYER_RADIUS * 1.5) {
+      // 60ダメージ
+      for (let i = 0; i < 60; i++) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "hit", targetId: id }));
+        }
+      }
+    }
+  }
+
+  // ビームエフェクト追加
+  beamEffects.push({
+    startX,
+    startY,
+    angle,
+    endTime: performance.now() + 300,
+  });
+}
+
+// ショットガン発射
+function fireShotgun(centerAngle: number) {
+  const pelletCount = 7;
+  const spreadAngle = 0.6;
+  const speed = SIZE * 2.5;
+
+  for (let i = 0; i < pelletCount; i++) {
+    const offset = (i - (pelletCount - 1) / 2) * (spreadAngle / (pelletCount - 1));
+    const angle = centerAngle + offset;
+
+    mySpecialBullets.push({
+      type: "shotgun",
+      x: myX,
+      y: myY,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      createdAt: performance.now(),
+    });
+  }
+}
+
+// ミサイル発射
+function fireMissile(initialAngle: number) {
+  // 最も近い敵を探す
+  let nearestId: string | null = null;
+  let nearestDist = Infinity;
+
+  for (const [id, p] of Object.entries(otherPlayers)) {
+    if (p.hp <= 0) continue;
+    const dist = Math.hypot(p.x - myX, p.y - myY);
+    if (dist < nearestDist) {
+      nearestDist = dist;
+      nearestId = id;
+    }
+  }
+
+  const speed = SIZE * 1.5;
+  mySpecialBullets.push({
+    type: "missile",
+    x: myX,
+    y: myY,
+    vx: Math.cos(initialAngle) * speed,
+    vy: Math.sin(initialAngle) * speed,
+    createdAt: performance.now(),
+    targetId: nearestId ?? undefined,
+  });
+}
+
+// シールド発動
+function activateShield() {
+  shieldActiveUntil = performance.now() + 3000;
+}
+
+// 特殊弾の更新
+function updateSpecialBullets(dt: number) {
+  const now = performance.now();
+
+  mySpecialBullets = mySpecialBullets.filter(bullet => {
+    switch (bullet.type) {
+      case "grenade":
+        bullet.x += bullet.vx * dt;
+        bullet.y += bullet.vy * dt;
+        // 爆発判定
+        if (now >= bullet.explosionTime!) {
+          explodeGrenade(bullet);
+          return false;
+        }
+        return true;
+
+      case "shotgun":
+        bullet.x += bullet.vx * dt;
+        bullet.y += bullet.vy * dt;
+        // 射程制限（アリーナ外で消滅）
+        const shotgunDist = Math.hypot(bullet.x - CENTER_X, bullet.y - CENTER_Y);
+        if (shotgunDist > ARENA_RADIUS + 50) return false;
+        // 当たり判定
+        for (const [id, p] of Object.entries(otherPlayers)) {
+          if (p.hp <= 0) continue;
+          const dx = p.x - bullet.x;
+          const dy = p.y - bullet.y;
+          if (dx * dx + dy * dy <= (PLAYER_RADIUS * 1.2) ** 2) {
+            // 8ダメージ
+            for (let i = 0; i < 8; i++) {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "hit", targetId: id }));
+              }
+            }
+            return false;
+          }
+        }
+        return true;
+
+      case "missile":
+        // 3秒経過で消滅
+        if (now - bullet.createdAt > 3000) return false;
+        // ターゲット追尾
+        if (bullet.targetId && otherPlayers[bullet.targetId] && otherPlayers[bullet.targetId].hp > 0) {
+          const target = otherPlayers[bullet.targetId];
+          const toTarget = Math.atan2(target.y - bullet.y, target.x - bullet.x);
+          const currentAngle = Math.atan2(bullet.vy, bullet.vx);
+          let angleDiff = normalizeAngle(toTarget - currentAngle);
+          const turnRate = 3.0 * dt;
+          angleDiff = Math.max(-turnRate, Math.min(turnRate, angleDiff));
+          const newAngle = currentAngle + angleDiff;
+          const speed = Math.hypot(bullet.vx, bullet.vy);
+          bullet.vx = Math.cos(newAngle) * speed;
+          bullet.vy = Math.sin(newAngle) * speed;
+        }
+        bullet.x += bullet.vx * dt;
+        bullet.y += bullet.vy * dt;
+        // 当たり判定
+        for (const [id, p] of Object.entries(otherPlayers)) {
+          if (p.hp <= 0) continue;
+          const dx = p.x - bullet.x;
+          const dy = p.y - bullet.y;
+          if (dx * dx + dy * dy <= (PLAYER_RADIUS * 1.5) ** 2) {
+            // 35ダメージ
+            for (let i = 0; i < 35; i++) {
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: "hit", targetId: id }));
+              }
+            }
+            // 爆発エフェクト
+            explosionEffects.push({
+              x: bullet.x,
+              y: bullet.y,
+              radius: PLAYER_RADIUS * 2,
+              startTime: now,
+              duration: 300,
+            });
+            return false;
+          }
+        }
+        // アリーナ外で消滅
+        const missileDist = Math.hypot(bullet.x - CENTER_X, bullet.y - CENTER_Y);
+        if (missileDist > ARENA_RADIUS + 50) return false;
+        return true;
+
+      default:
+        return false;
+    }
+  });
+}
+
+// グレネード爆発
+function explodeGrenade(bullet: SpecialBullet) {
+  const explosionRadius = PLAYER_RADIUS * 4;
+  const now = performance.now();
+
+  // 範囲内の全プレイヤーにダメージ
+  for (const [id, p] of Object.entries(otherPlayers)) {
+    if (p.hp <= 0) continue;
+    const dist = Math.hypot(p.x - bullet.x, p.y - bullet.y);
+    if (dist <= explosionRadius) {
+      // 40ダメージ
+      for (let i = 0; i < 40; i++) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "hit", targetId: id }));
+        }
+      }
+    }
+  }
+
+  // 爆発エフェクト追加
+  explosionEffects.push({
+    x: bullet.x,
+    y: bullet.y,
+    radius: explosionRadius,
+    startTime: now,
+    duration: 400,
+  });
 }
 
 // ゲームループ
@@ -434,6 +839,13 @@ function gameLoop() {
     }
   }
   myBullets = myBullets.filter(b => b.x < 1e8);
+
+  // 特殊弾の更新
+  updateSpecialBullets(dt);
+
+  // エフェクトの更新
+  beamEffects = beamEffects.filter(e => now < e.endTime);
+  explosionEffects = explosionEffects.filter(e => now < e.startTime + e.duration);
 
   // 自分の状態をサーバーに送信
   if (ws.readyState === WebSocket.OPEN && myId) {
@@ -555,6 +967,77 @@ function draw() {
     ctx.fill();
   }
 
+  // 特殊弾の描画
+  for (const b of mySpecialBullets) {
+    const weapon = WEAPONS.find(w => w.id === b.type);
+    if (!weapon) continue;
+    ctx.fillStyle = weapon.color;
+    const bulletSize = b.type === "grenade" ? SIZE * 0.025 : b.type === "missile" ? SIZE * 0.02 : SIZE * 0.015;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, bulletSize, 0, Math.PI * 2);
+    ctx.fill();
+    // ミサイルには方向を示す三角形を追加
+    if (b.type === "missile") {
+      const angle = Math.atan2(b.vy, b.vx);
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.moveTo(bulletSize * 1.5, 0);
+      ctx.lineTo(-bulletSize * 0.5, -bulletSize * 0.8);
+      ctx.lineTo(-bulletSize * 0.5, bulletSize * 0.8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // ビームエフェクトの描画
+  const now = performance.now();
+  for (const beam of beamEffects) {
+    const alpha = (beam.endTime - now) / 300;
+    ctx.strokeStyle = `rgba(0, 255, 255, ${alpha})`;
+    ctx.lineWidth = SIZE * 0.02;
+    ctx.beginPath();
+    ctx.moveTo(beam.startX, beam.startY);
+    ctx.lineTo(
+      beam.startX + Math.cos(beam.angle) * ARENA_RADIUS * 2,
+      beam.startY + Math.sin(beam.angle) * ARENA_RADIUS * 2
+    );
+    ctx.stroke();
+    // 中心の細い線
+    ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+    ctx.lineWidth = SIZE * 0.005;
+    ctx.beginPath();
+    ctx.moveTo(beam.startX, beam.startY);
+    ctx.lineTo(
+      beam.startX + Math.cos(beam.angle) * ARENA_RADIUS * 2,
+      beam.startY + Math.sin(beam.angle) * ARENA_RADIUS * 2
+    );
+    ctx.stroke();
+  }
+
+  // 爆発エフェクトの描画
+  for (const exp of explosionEffects) {
+    const elapsed = now - exp.startTime;
+    const progress = elapsed / exp.duration;
+    const currentRadius = exp.radius * (0.5 + progress * 0.5);
+    const alpha = 1 - progress;
+
+    // 外側のリング
+    ctx.strokeStyle = `rgba(255, 100, 0, ${alpha})`;
+    ctx.lineWidth = SIZE * 0.01;
+    ctx.beginPath();
+    ctx.arc(exp.x, exp.y, currentRadius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 内側の塗りつぶし
+    ctx.fillStyle = `rgba(255, 200, 50, ${alpha * 0.5})`;
+    ctx.beginPath();
+    ctx.arc(exp.x, exp.y, currentRadius * 0.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   // 他プレイヤー（補間された位置で描画）
   for (const p of Object.values(otherPlayersDisplay)) {
     ctx.fillStyle = PLAYER_COLORS[p.zone] || "#ff5a5a";
@@ -590,6 +1073,20 @@ function draw() {
     ctx.beginPath();
     ctx.arc(myX, myY, PLAYER_RADIUS + 4, 0, Math.PI * 2);
     ctx.stroke();
+
+    // シールドエフェクト
+    if (now < shieldActiveUntil) {
+      const shieldAlpha = 0.3 + 0.2 * Math.sin(now / 100);
+      ctx.strokeStyle = `rgba(0, 255, 0, ${shieldAlpha})`;
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(myX, myY, PLAYER_RADIUS * 1.8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = `rgba(0, 255, 0, ${shieldAlpha * 0.3})`;
+      ctx.beginPath();
+      ctx.arc(myX, myY, PLAYER_RADIUS * 1.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     // HPバー（回転を打ち消して水平に描画）
     ctx.save();
@@ -659,6 +1156,166 @@ function draw() {
   ctx.font = `${SIZE * 0.025}px sans-serif`;
   ctx.fillText("↑照準", SIZE * 0.02, SIZE * 0.48);
   ctx.fillText("↓移動", SIZE * 0.02, SIZE * 0.54);
+
+  // 武器エリアの背景
+  ctx.fillStyle = "#1a1a1a";
+  ctx.fillRect(0, GAME_AREA_HEIGHT, SIZE, WEAPON_AREA_HEIGHT);
+
+  // 武器ボタンの描画
+  drawWeaponButtons();
+
+  // 武器スワイプインジケーター
+  if (weaponTouchId !== null && activeWeaponIndex !== null) {
+    const dx = weaponTouchCurrentX - weaponTouchStartX;
+    const dy = weaponTouchCurrentY - weaponTouchStartY;
+    const dist = Math.hypot(dx, dy);
+
+    if (dist > 10) {
+      const weapon = WEAPONS[activeWeaponIndex];
+      ctx.strokeStyle = weapon.color;
+      ctx.lineWidth = 3;
+      ctx.setLineDash([8, 4]);
+      ctx.beginPath();
+      ctx.moveTo(weaponTouchStartX, weaponTouchStartY);
+      ctx.lineTo(weaponTouchCurrentX, weaponTouchCurrentY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // 矢印の先端
+      const angle = Math.atan2(dy, dx);
+      ctx.save();
+      ctx.translate(weaponTouchCurrentX, weaponTouchCurrentY);
+      ctx.rotate(angle);
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-12, -8);
+      ctx.lineTo(-12, 8);
+      ctx.closePath();
+      ctx.fillStyle = weapon.color;
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+// 武器ボタン描画
+function drawWeaponButtons() {
+  const now = performance.now();
+
+  for (let i = 0; i < BUTTON_COUNT; i++) {
+    const weapon = WEAPONS[i];
+    const x = BUTTON_GAP + i * (BUTTON_SIZE + BUTTON_GAP);
+    const y = BUTTON_Y;
+    const isReady = isWeaponReady(weapon);
+    const isActive = activeWeaponIndex === i;
+
+    // ボタン背景
+    ctx.fillStyle = isActive ? "#444" : isReady ? "#333" : "#222";
+    ctx.beginPath();
+    ctx.roundRect(x, y, BUTTON_SIZE, BUTTON_SIZE, 8);
+    ctx.fill();
+
+    // 枠線
+    ctx.strokeStyle = isActive ? weapon.color : isReady ? "#555" : "#333";
+    ctx.lineWidth = isActive ? 3 : 2;
+    ctx.beginPath();
+    ctx.roundRect(x, y, BUTTON_SIZE, BUTTON_SIZE, 8);
+    ctx.stroke();
+
+    // 幾何学マーク
+    const cx = x + BUTTON_SIZE / 2;
+    const cy = y + BUTTON_SIZE / 2;
+    const markSize = BUTTON_SIZE * 0.28;
+    ctx.strokeStyle = isReady ? weapon.color : "#555";
+    ctx.fillStyle = isReady ? weapon.color : "#555";
+    ctx.lineWidth = 2.5;
+
+    drawWeaponMark(cx, cy, markSize, weapon.mark);
+
+    // クールタイム表示
+    if (!isReady) {
+      const elapsed = now - weapon.lastUsedAt;
+      const remaining = weapon.cooldown - elapsed;
+      const ratio = Math.max(0, remaining / weapon.cooldown);
+
+      // 暗いオーバーレイ（パイチャート式）
+      ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, BUTTON_SIZE / 2 - 4, -Math.PI / 2, -Math.PI / 2 + ratio * Math.PI * 2);
+      ctx.closePath();
+      ctx.fill();
+
+      // 残り秒数
+      ctx.fillStyle = "#fff";
+      ctx.font = `bold ${BUTTON_SIZE * 0.3}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(Math.ceil(remaining / 1000).toString(), cx, cy);
+    }
+  }
+}
+
+// 幾何学マーク描画
+function drawWeaponMark(cx: number, cy: number, size: number, mark: WeaponMark) {
+  ctx.beginPath();
+
+  switch (mark) {
+    case "hexagon":
+      // 六角形
+      for (let i = 0; i < 6; i++) {
+        const angle = (i * Math.PI * 2) / 6 - Math.PI / 2;
+        const px = cx + Math.cos(angle) * size;
+        const py = cy + Math.sin(angle) * size;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      break;
+
+    case "diamond":
+      // 菱形
+      ctx.moveTo(cx, cy - size);
+      ctx.lineTo(cx + size, cy);
+      ctx.lineTo(cx, cy + size);
+      ctx.lineTo(cx - size, cy);
+      ctx.closePath();
+      ctx.stroke();
+      break;
+
+    case "triangle":
+      // 三角形（上向き）
+      ctx.moveTo(cx, cy - size);
+      ctx.lineTo(cx + size * 0.866, cy + size * 0.5);
+      ctx.lineTo(cx - size * 0.866, cy + size * 0.5);
+      ctx.closePath();
+      ctx.stroke();
+      break;
+
+    case "star":
+      // 五芒星
+      for (let i = 0; i < 10; i++) {
+        const angle = (i * Math.PI) / 5 - Math.PI / 2;
+        const r = i % 2 === 0 ? size : size * 0.4;
+        const px = cx + Math.cos(angle) * r;
+        const py = cy + Math.sin(angle) * r;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      break;
+
+    case "circle":
+      // 二重円
+      ctx.arc(cx, cy, size, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(cx, cy, size * 0.55, 0, Math.PI * 2);
+      ctx.stroke();
+      break;
+  }
 }
 
 function drawHpBarAt(x: number, y: number, hp: number) {
